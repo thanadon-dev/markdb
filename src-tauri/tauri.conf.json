@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "SparkDB",
+  "productName": "MarkDB",
   "version": "0.1.0",
-  "identifier": "com.gpsc11cs0945.sparkdb",
+  "identifier": "com.thanadon.markdb",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "SparkDB",
+        "title": "MarkDB",
         "width": 1360,
         "height": 860,
         "minWidth": 900,
