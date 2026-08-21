@@ -1,6 +1,9 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { getVersion } from "@tauri-apps/api/app";
 import CodeMirror from "@uiw/react-codemirror";
 import { PostgreSQL, sql as sqlLang } from "@codemirror/lang-sql";
 import { createTheme } from "@uiw/codemirror-themes";
@@ -20,6 +23,7 @@ import {
   CheckCircle,
   Database,
   DownloadSimple,
+  Confetti,
   Eye,
   FloppyDisk,
   Lightning,
@@ -28,6 +32,7 @@ import {
   Play,
   Plug,
   Plus,
+  RowsPlusBottom,
   Spinner,
   Table as TableIcon,
   Trash,
@@ -164,6 +169,18 @@ const cellText = (v: unknown) =>
       ? JSON.stringify(v)
       : String(v);
 
+/* ตัวเลขเทียบเป็นตัวเลข (ไม่งั้น "10" < "9"), ที่เหลือเทียบแบบภาษาไทย */
+const compare = (a: unknown, b: unknown) => {
+  if (typeof a === "number" && typeof b === "number") return a - b;
+  if (typeof a === "boolean" && typeof b === "boolean") return Number(a) - Number(b);
+  const sa = cellText(a);
+  const sb = cellText(b);
+  const na = Number(sa);
+  const nb = Number(sb);
+  if (sa !== "" && sb !== "" && !Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
+  return sa.localeCompare(sb, "th");
+};
+
 const cellClass = (v: unknown) =>
   v === null || v === undefined
     ? "cell null"
@@ -216,8 +233,10 @@ const Grid = memo(function Grid({
 }) {
   const parent = useRef<HTMLDivElement>(null);
   const [picked, setPicked] = useState("");
+  const [selRow, setSelRow] = useState(-1);
   const [editing, setEditing] = useState("");
   const [draft, setDraft] = useState("");
+  const [sort, setSort] = useState<{ col: string; dir: "asc" | "desc" } | null>(null);
 
   const widths = useMemo(
     () =>
@@ -231,12 +250,33 @@ const Grid = memo(function Grid({
   );
   const template = useMemo(() => widths.map((w) => `${w}px`).join(" "), [widths]);
 
+  /* เรียงลำดับฝั่ง client บน "ลำดับ index" ไม่ใช่ตัว rows — index เดิมจึงยังใช้อ้าง
+     ตอนแก้ค่าได้ถูกแถว และไม่ต้องยิง query ใหม่ */
+  const order = useMemo(() => {
+    const idx = res.rows.map((_, i) => i);
+    if (!sort) return idx;
+    const sign = sort.dir === "asc" ? 1 : -1;
+    return idx.sort((a, b) => {
+      const va = res.rows[a][sort.col];
+      const vb = res.rows[b][sort.col];
+      const an = va === null || va === undefined;
+      const bn = vb === null || vb === undefined;
+      if (an || bn) return an && bn ? 0 : an ? 1 : -1; // ค่าว่างไปท้ายเสมอ ไม่ว่าเรียงทางไหน
+      return compare(va, vb) * sign;
+    });
+  }, [res, sort]);
+
   const rv = useVirtualizer({
-    count: res.rows.length,
+    count: order.length,
     getScrollElement: () => parent.current,
     estimateSize: () => ROW_H,
     overscan: 12,
   });
+
+  const cycleSort = (c: string) =>
+    setSort((s) =>
+      s?.col !== c ? { col: c, dir: "asc" } : s.dir === "asc" ? { col: c, dir: "desc" } : null,
+    );
 
   const commit = (index: number, col: string, original: unknown) => {
     setEditing("");
@@ -258,26 +298,34 @@ const Grid = memo(function Grid({
     <div className="result" ref={parent}>
       <div className="grid-head" style={{ gridTemplateColumns: template }}>
         {res.columns.map((c) => (
-          <div key={c} className={pk.includes(c) ? "pk" : ""} title={c}>
+          <div
+            key={c}
+            className={(pk.includes(c) ? "pk" : "") + (sort?.col === c ? " sorted" : "")}
+            title={`${c} — คลิกเพื่อเรียง (น้อย→มาก, มาก→น้อย, ยกเลิก)`}
+            onClick={() => cycleSort(c)}
+          >
             {pk.includes(c) ? `🔑 ${c}` : c}
+            {sort?.col === c && <i>{sort.dir === "asc" ? "▲" : "▼"}</i>}
           </div>
         ))}
       </div>
       <div className="grid-body" style={{ height: rv.getTotalSize() }}>
         {rv.getVirtualItems().map((vi) => {
-          const row = res.rows[vi.index];
+          const ri = order[vi.index];
+          const row = res.rows[ri];
           return (
             <div
               key={vi.key}
-              className="grid-row"
+              className={"grid-row" + (selRow === ri ? " sel" : "")}
               style={{
                 gridTemplateColumns: template,
                 height: ROW_H,
                 transform: `translateY(${vi.start}px)`,
               }}
+              onClick={() => setSelRow(ri)}
             >
               {res.columns.map((c) => {
-                const id = `${vi.index}:${c}`;
+                const id = `${ri}:${c}`;
                 if (editing === id)
                   return (
                     <div key={c} className="cell editing">
@@ -287,10 +335,12 @@ const Grid = memo(function Grid({
                         onChange={(e) => setDraft(e.target.value)}
                         onBlur={() => setEditing("")}
                         onKeyDown={(e) => {
-                          const save = e.key === "Enter" || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s");
+                          const save =
+                            e.key === "Enter" ||
+                            ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s");
                           if (save) {
                             e.preventDefault();
-                            commit(vi.index, c, row[c]);
+                            commit(ri, c, row[c]);
                           }
                           if (e.key === "Escape") setEditing("");
                         }}
@@ -303,7 +353,9 @@ const Grid = memo(function Grid({
                     className={cellClass(row[c]) + (picked === id ? " picked" : "")}
                     title={
                       editable
-                        ? `${cellText(row[c])}\n\nดับเบิลคลิกเพื่อแก้ (พิมพ์ NULL = ค่าว่าง)`
+                        ? `${cellText(row[c])}
+
+ดับเบิลคลิกเพื่อแก้ (พิมพ์ NULL = ค่าว่าง)`
                         : cellText(row[c])
                     }
                     onDoubleClick={() => {
@@ -347,6 +399,12 @@ export default function App() {
   const [restoreFile, setRestoreFile] = useState<string | null>(null);
   const [test, setTest] = useState<{ ok: boolean; msg: string } | null>(null);
   const [testing, setTesting] = useState(false);
+  const [version, setVersion] = useState("");
+  const [update, setUpdate] = useState<Update | null>(null);
+  const [pct, setPct] = useState<number | null>(null);
+  const [addRow, setAddRow] = useState<{ cols: ColumnInfo[]; vals: Record<string, string> } | null>(
+    null,
+  );
   const [busy, setBusy] = useState(false);
 
   const tab = tabs.find((t) => t.id === activeTab) ?? tabs[0];
@@ -373,7 +431,12 @@ export default function App() {
             ? "query ไม่ตรงกับตารางต้นทางแล้ว — ปิดการแก้ค่าไว้"
             : "ผลลัพธ์ไม่มีคอลัมน์ primary key ครบ — แก้ค่าไม่ได้";
 
+  const canAddRow = !!(tab?.source && tab.sql.includes(tab.source));
+
   useEffect(() => setActiveTab((a) => a || tabs[0].id), [tabs]);
+  useEffect(() => {
+    getVersion().then(setVersion).catch(() => {});
+  }, []);
   useEffect(() => localStorage.setItem(CONNS_KEY, JSON.stringify(conns)), [conns]);
   // แก้ค่าในฟอร์มเมื่อไร ผลทดสอบเดิมถือว่าใช้ไม่ได้แล้ว
   useEffect(() => setTest(null), [form?.host, form?.port, form?.user, form?.pass, form?.db, form?.ssl, form?.url]);
@@ -470,6 +533,33 @@ export default function App() {
     [say],
   );
 
+  /* เปิดฟอร์มเพิ่มแถว — ดึง type/default ของคอลัมน์มาโชว์เป็นคำใบ้ */
+  const openAddRow = useCallback(async () => {
+    if (!tab?.source) return;
+    try {
+      const props = await invoke<TableProps>("table_props", { table: tab.source });
+      setAddRow({ cols: props.columns, vals: {} });
+    } catch (e) {
+      say(String(e));
+    }
+  }, [tab, say]);
+
+  const saveNewRow = useCallback(async () => {
+    if (!addRow || !tab?.source) return;
+    // ส่งเฉพาะช่องที่กรอกจริง — ที่เหลือปล่อยให้ DEFAULT ของตารางทำงาน
+    const values = Object.entries(addRow.vals)
+      .filter(([, v]) => v !== "")
+      .map(([column, v]) => ({ column, value: v.toUpperCase() === "NULL" ? null : v }));
+    try {
+      await invoke("insert_row", { table: tab.source, values });
+      setAddRow(null);
+      say("เพิ่มแถวแล้ว");
+      run(tab.id, tab.sql);
+    } catch (e) {
+      say(String(e));
+    }
+  }, [addRow, tab, run, say]);
+
   const editCell = useCallback(
     async (rowIndex: number, column: string, value: string | null) => {
       if (!tab?.res || !tab.source || !tab.pk) return;
@@ -528,6 +618,47 @@ export default function App() {
     },
     [tab, say],
   );
+
+  /* เช็คอัปเดตตอนเปิดแอป — เงียบไว้ถ้าเช็คไม่ได้ (ออฟไลน์/ยังไม่มี release) */
+  const checkUpdate = useCallback(
+    async (loud = false) => {
+      try {
+        const u = await check();
+        if (u) setUpdate(u);
+        else if (loud) say(`ใช้เวอร์ชันล่าสุดอยู่แล้ว (${version})`);
+      } catch (e) {
+        if (loud) say(String(e));
+      }
+    },
+    [version, say],
+  );
+
+  useEffect(() => {
+    checkUpdate();
+    // เช็คครั้งเดียวตอนเปิด — ไม่ poll ซ้ำ
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const installUpdate = useCallback(async () => {
+    if (!update) return;
+    let total = 0;
+    let got = 0;
+    setPct(0);
+    try {
+      await update.downloadAndInstall((e) => {
+        if (e.event === "Started") total = e.data.contentLength ?? 0;
+        else if (e.event === "Progress") {
+          got += e.data.chunkLength;
+          setPct(total ? Math.round((got / total) * 100) : null);
+        } else if (e.event === "Finished") setPct(100);
+      });
+      await relaunch();
+    } catch (e) {
+      setPct(null);
+      setUpdate(null);
+      say(String(e));
+    }
+  }, [update, say]);
 
   const testConn = useCallback(async (c: Conn) => {
     setTesting(true);
@@ -862,6 +993,14 @@ export default function App() {
           >
             <Play size={14} weight="fill" /> Run <span style={{ opacity: 0.55 }}>Ctrl+↵</span>
           </button>
+          <button
+            className="btn sm"
+            onClick={openAddRow}
+            disabled={!canAddRow}
+            title={canAddRow ? "เพิ่มแถวใหม่ในตารางนี้" : "เปิดตารางจากแถบซ้ายก่อนถึงจะเพิ่มแถวได้"}
+          >
+            <RowsPlusBottom size={15} weight="duotone" /> Add row
+          </button>
           <div className="spacer" />
           {editable ? (
             <span style={{ color: "var(--dim)", fontSize: 12 }}>
@@ -936,6 +1075,9 @@ export default function App() {
           )}
           <span style={{ flex: 1 }} />
           {busy && <span>กำลังทำงาน…</span>}
+          <button className="verbtn" title="ตรวจหาอัปเดต" onClick={() => checkUpdate(true)}>
+            v{version}
+          </button>
         </div>
       </main>
 
@@ -1044,6 +1186,68 @@ export default function App() {
                 }}
               >
                 บันทึก & เชื่อมต่อ
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {addRow && (
+        <div className="overlay" onClick={() => setAddRow(null)}>
+          <div className="modal wide" onClick={(e) => e.stopPropagation()}>
+            <h3>
+              <RowsPlusBottom size={17} weight="duotone" /> เพิ่มแถวใน {tab?.title}
+            </h3>
+            <p>เว้นว่างไว้ = ใช้ค่า default ของคอลัมน์ · พิมพ์ NULL = ใส่ค่าว่าง</p>
+            <div className="cols">
+              {addRow.cols.map((c) => (
+                <label className="addrow" key={c.name}>
+                  <span>
+                    {c.pk && "🔑 "}
+                    {c.name}
+                    <em>{c.data_type}</em>
+                  </span>
+                  <input
+                    value={addRow.vals[c.name] ?? ""}
+                    placeholder={c.default || (c.nullable ? "NULL" : "ต้องกรอก")}
+                    onChange={(e) =>
+                      setAddRow({ ...addRow, vals: { ...addRow.vals, [c.name]: e.target.value } })
+                    }
+                  />
+                </label>
+              ))}
+            </div>
+            <div className="modal-foot">
+              <button className="btn sm" onClick={() => setAddRow(null)}>
+                ยกเลิก
+              </button>
+              <button className="btn primary sm" onClick={saveNewRow}>
+                เพิ่มแถว
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {update && (
+        <div className="overlay">
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>
+              <Confetti size={17} weight="duotone" /> มีเวอร์ชันใหม่ {update.version}
+            </h3>
+            <p>ตอนนี้ใช้ v{version} อยู่</p>
+            {update.body && <div className="notes">{update.body}</div>}
+            {pct !== null && (
+              <div className="bar">
+                <div style={{ width: `${pct}%` }} />
+              </div>
+            )}
+            <div className="modal-foot">
+              <button className="btn sm" onClick={() => setUpdate(null)} disabled={pct !== null}>
+                ภายหลัง
+              </button>
+              <button className="btn primary sm" onClick={installUpdate} disabled={pct !== null}>
+                {pct === null ? "อัปเดตแล้วรีสตาร์ท" : `กำลังโหลด ${pct}%`}
               </button>
             </div>
           </div>

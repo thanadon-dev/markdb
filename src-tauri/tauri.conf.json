@@ -33,6 +33,15 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE1NDExNkY3NEVBRUY3MUEKUldRYTk2NU85eFpCcGJBMkxVY0FBRUZsUHpxRDVkWE9GOWZnTXRPZzR1N3dSL1UvYVlxVEE0UFIK",
+      "endpoints": [
+        "https://github.com/thanadon-dev/markdb/releases/latest/download/latest.json"
+      ]
+    }
   }
 }
