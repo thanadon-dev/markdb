@@ -34,7 +34,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # key ไม่ได้ตั้งรหัส — ต้องส่งค่าว่างไป ไม่งั้น tauri จะรอถามรหัสแล้วค้าง
+          # (GitHub สร้าง secret ที่เป็นค่าว่างไม่ได้ เลยฮาร์ดโค้ดตรงนี้แทน)
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
           tagName: ${{ github.ref_name }}
           releaseName: MarkDB ${{ github.ref_name }}
