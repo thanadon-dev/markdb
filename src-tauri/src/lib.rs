@@ -472,7 +472,7 @@ async fn backup_database(path: String, state: tauri::State<'_, AppState>) -> R<S
         .fetch_one(&p)
         .await
         .map_err(err)?;
-    w!("-- SparkDB backup of database \"{}\"", db);
+    w!("-- MarkDB backup of database \"{}\"", db);
     w!("SET client_encoding = 'UTF8';");
     w!("SET standard_conforming_strings = on;\n");
 

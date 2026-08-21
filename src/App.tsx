@@ -76,7 +76,7 @@ type Conn = {
   url?: string; // connection ที่บันทึกไว้แบบเดิม (เป็น URL ล้วน)
 };
 
-const CONNS_KEY = "sparkdb.conns";
+const CONNS_KEY = "markdb.conns";
 const ROW_H = 28;
 const BLANK: Conn = {
   id: "",
@@ -141,18 +141,19 @@ const completionKeys = Prec.highest(
   keymap.of([{ key: "Tab", run: acceptCompletion }, ...completionKeymap]),
 );
 
-const SparkMark = () => (
+const MarkMark = () => (
   <svg
     width="19"
     height="19"
     viewBox="0 0 1024 1024"
     fill="none"
     stroke="currentColor"
-    strokeWidth="66"
+    strokeWidth="74"
     strokeLinecap="round"
+    strokeLinejoin="round"
     aria-hidden
   >
-    <path d="M686 322A214 214 0 0 0 506 232c-113 0-180 58-180 143 0 183 366 102 366 292 0 94-78 168-194 168a221 221 0 0 1-194-102" />
+    <path d="M298 736L298 306L512 556L726 306L726 736" />
   </svg>
 );
 
@@ -690,8 +691,8 @@ export default function App() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          <SparkMark />
-          SparkDB
+          <MarkMark />
+          MarkDB
         </div>
 
         <div className="side-section">

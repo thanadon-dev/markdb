@@ -1,4 +1,4 @@
-# SparkDB
+# MarkDB
 
 Postgres client ที่เบาและเร็ว — Tauri v2 + Rust + React
 
@@ -34,7 +34,7 @@ npm run tauri build
 ```
 
 ผลลัพธ์:
-- `src-tauri/target/release/sparkdb.exe` — portable
+- `src-tauri/target/release/markdb.exe` — portable
 - `src-tauri/target/release/bundle/nsis/*.exe` — installer
 - `src-tauri/target/release/bundle/msi/*.msi`
 
