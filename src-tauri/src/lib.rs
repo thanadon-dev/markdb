@@ -251,6 +251,47 @@ struct KeyVal {
     value: Option<String>,
 }
 
+/// เพิ่มแถวใหม่ — ส่งมาเฉพาะคอลัมน์ที่ผู้ใช้กรอกจริง
+/// คอลัมน์ที่ไม่ได้ส่งมาจะได้ DEFAULT ของตาราง (serial/uuid/now() จึงทำงานตามปกติ)
+#[tauri::command]
+async fn insert_row(
+    table: String,
+    values: Vec<KeyVal>,
+    state: tauri::State<'_, AppState>,
+) -> R<u64> {
+    let p = pool(&state).await?;
+    let sql = if values.is_empty() {
+        format!("insert into {} default values", table)
+    } else {
+        format!(
+            "insert into {} ({}) values ({})",
+            table,
+            values
+                .iter()
+                .map(|v| ident(&v.column))
+                .collect::<Vec<_>>()
+                .join(", "),
+            values
+                .iter()
+                .map(|v| lit(&v.value))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let mut tx = p.begin().await.map_err(err)?;
+    match sqlx::query(&sql).execute(&mut *tx).await {
+        Ok(r) => {
+            let n = r.rows_affected();
+            tx.commit().await.map_err(err)?;
+            Ok(n)
+        }
+        Err(e) => {
+            tx.rollback().await.ok();
+            Err(err(e))
+        }
+    }
+}
+
 /// แก้ค่า cell เดียวผ่าน primary key — รันใน transaction แล้วยืนยันว่าโดนแค่ 1 แถว
 /// ถ้าไม่ใช่ 1 แถว rollback ทิ้งทันที (กันเคส pk ซ้ำ/แถวหาย แล้วเขียนทับข้อมูลคนอื่น)
 #[tauri::command]
@@ -686,9 +727,18 @@ async fn import_sql(path: String, state: tauri::State<'_, AppState>) -> R<u64> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+
+    #[cfg(desktop)]
+    {
+        builder = builder
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .plugin(tauri_plugin_process::init());
+    }
+
+    builder
         .manage(AppState {
             pool: Mutex::new(None),
         })
@@ -702,6 +752,7 @@ pub fn run() {
             column_values,
             table_props,
             update_cell,
+            insert_row,
             run_query,
             export_csv,
             export_sql,

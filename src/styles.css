@@ -792,3 +792,105 @@ select:focus {
 .editor .cm-line {
   line-height: 1.7;
 }
+
+.verbtn {
+  color: var(--dim);
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 6px;
+}
+
+.verbtn:hover {
+  color: var(--text);
+  background: var(--panel);
+}
+
+.notes {
+  max-height: 200px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  color: var(--dim);
+  user-select: text;
+}
+
+.bar {
+  height: 6px;
+  margin-top: 14px;
+  border-radius: 4px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.bar div {
+  height: 100%;
+  background: #fff;
+  transition: width 0.15s;
+}
+
+.grid-head div {
+  cursor: pointer;
+  user-select: none;
+}
+
+.grid-head div:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.grid-head div.sorted {
+  color: var(--text);
+}
+
+.grid-head div i {
+  font-style: normal;
+  margin-left: 5px;
+  font-size: 9px;
+  opacity: 0.75;
+}
+
+.grid-row.sel .cell {
+  background: #1f1f1f !important;
+}
+
+.grid-row.sel .cell:first-child {
+  box-shadow: inset 3px 0 0 #fff;
+}
+
+.addrow {
+  display: grid;
+  grid-template-columns: 1fr 1.3fr;
+  gap: 12px;
+  align-items: center;
+  padding: 7px 12px;
+  border-bottom: 1px solid #141414;
+}
+
+.addrow:last-child {
+  border-bottom: 0;
+}
+
+.addrow > span {
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.addrow em {
+  display: block;
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--dim);
+}
+
+.addrow input {
+  padding: 5px 9px;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+}
