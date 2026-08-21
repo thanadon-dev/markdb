@@ -62,7 +62,8 @@ GitHub Actions จะ build, เซ็น, สร้าง Release พร้อ�
 | ชื่อ | ค่า |
 |---|---|
 | `TAURI_SIGNING_PRIVATE_KEY` | เนื้อไฟล์ private key ทั้งไฟล์ |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | เว้นว่าง (key นี้ไม่ได้ตั้งรหัส) |
+
+มีแค่ตัวเดียว — key ไม่ได้ตั้งรหัส และ workflow ส่งค่าว่างให้เองอยู่แล้ว
 
 ⚠️ private key อยู่นอก repo ที่ `~/.tauri/markdb.key` — **หายแล้วปล่อยอัปเดตให้เครื่องที่ติดตั้งไปแล้วไม่ได้อีกเลย** ต้องให้ทุกคนถอนแล้วติดตั้งใหม่ สำรองไว้ที่ปลอดภัย
 
