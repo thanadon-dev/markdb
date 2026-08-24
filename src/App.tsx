@@ -68,6 +68,9 @@ type ColumnInfo = {
   pk: boolean;
 };
 type TableProps = { columns: ColumnInfo[]; approx_rows: number; size: string };
+type Release = { tag_name: string; name: string; published_at: string; body: string };
+
+const RELEASES_API = "https://api.github.com/repos/thanadon-dev/markdb/releases?per_page=20";
 
 type Conn = {
   id: string;
@@ -402,6 +405,9 @@ export default function App() {
   const [version, setVersion] = useState("");
   const [update, setUpdate] = useState<Update | null>(null);
   const [pct, setPct] = useState<number | null>(null);
+  const [updatesOpen, setUpdatesOpen] = useState(false);
+  const [rels, setRels] = useState<Release[] | null>(null);
+  const [relErr, setRelErr] = useState("");
   const [addRow, setAddRow] = useState<{ cols: ColumnInfo[]; vals: Record<string, string> } | null>(
     null,
   );
@@ -624,7 +630,8 @@ export default function App() {
     async (loud = false) => {
       try {
         const u = await check();
-        if (u) setUpdate(u);
+        setUpdate(u ?? null);
+        if (u) setUpdatesOpen(true);
         else if (loud) say(`ใช้เวอร์ชันล่าสุดอยู่แล้ว (${version})`);
       } catch (e) {
         if (loud) say(String(e));
@@ -632,6 +639,26 @@ export default function App() {
     },
     [version, say],
   );
+
+  /* ประวัติแต่ละเวอร์ชันดึงสดจาก GitHub Releases — ไม่ต้องฝัง changelog ไว้ในแอป
+     เขียน release notes ที่ GitHub ที่เดียว แอปทุกเครื่องเห็นตรงกันทันที */
+  const loadReleases = useCallback(async () => {
+    setRels(null);
+    setRelErr("");
+    try {
+      const r = await fetch(RELEASES_API);
+      if (!r.ok) throw new Error(`GitHub ตอบกลับ ${r.status}`);
+      setRels(await r.json());
+    } catch (e) {
+      setRelErr(String(e));
+    }
+  }, []);
+
+  const openUpdates = useCallback(() => {
+    setUpdatesOpen(true);
+    loadReleases();
+    checkUpdate();
+  }, [loadReleases, checkUpdate]);
 
   useEffect(() => {
     checkUpdate();
@@ -824,6 +851,9 @@ export default function App() {
         <div className="brand">
           <MarkMark />
           MarkDB
+          <button className="verbtn" title="ประวัติเวอร์ชัน / ตรวจหาอัปเดต" onClick={openUpdates}>
+            v{version}
+          </button>
         </div>
 
         <div className="side-section">
@@ -1075,9 +1105,6 @@ export default function App() {
           )}
           <span style={{ flex: 1 }} />
           {busy && <span>กำลังทำงาน…</span>}
-          <button className="verbtn" title="ตรวจหาอัปเดต" onClick={() => checkUpdate(true)}>
-            v{version}
-          </button>
         </div>
       </main>
 
@@ -1229,25 +1256,61 @@ export default function App() {
         </div>
       )}
 
-      {update && (
-        <div className="overlay">
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+      {updatesOpen && (
+        <div className="overlay" onClick={() => pct === null && setUpdatesOpen(false)}>
+          <div className="modal wide" onClick={(e) => e.stopPropagation()}>
             <h3>
-              <Confetti size={17} weight="duotone" /> มีเวอร์ชันใหม่ {update.version}
+              <Confetti size={17} weight="duotone" /> อัปเดต
             </h3>
-            <p>ตอนนี้ใช้ v{version} อยู่</p>
-            {update.body && <div className="notes">{update.body}</div>}
-            {pct !== null && (
-              <div className="bar">
-                <div style={{ width: `${pct}%` }} />
+            <p>ตอนนี้ใช้ v{version}</p>
+
+            {update ? (
+              <div className="newver">
+                <div>
+                  มีเวอร์ชันใหม่ <b>v{update.version}</b>
+                </div>
+                {pct !== null && (
+                  <div className="bar">
+                    <div style={{ width: `${pct}%` }} />
+                  </div>
+                )}
+                <button className="btn primary sm" onClick={installUpdate} disabled={pct !== null}>
+                  {pct === null ? "อัปเดตแล้วรีสตาร์ท" : `กำลังโหลด ${pct}%`}
+                </button>
               </div>
+            ) : (
+              <div className="uptodate">ใช้เวอร์ชันล่าสุดอยู่แล้ว</div>
             )}
+
+            <div className="side-label" style={{ paddingLeft: 0 }}>
+              ประวัติเวอร์ชัน
+            </div>
+            <div className="cols">
+              {relErr && <div className="relrow">โหลดประวัติไม่ได้ — {relErr}</div>}
+              {!relErr && rels === null && <div className="relrow">กำลังโหลด…</div>}
+              {rels?.length === 0 && <div className="relrow">ยังไม่มี release</div>}
+              {rels?.map((r) => (
+                <div className="relrow" key={r.tag_name}>
+                  <div className="reltop">
+                    <b>{r.name || r.tag_name}</b>
+                    <span>{r.published_at?.slice(0, 10)}</span>
+                    {r.tag_name === `v${version}` && <i>ที่ใช้อยู่</i>}
+                  </div>
+                  {r.body?.trim() && <div className="relbody">{r.body.trim()}</div>}
+                </div>
+              ))}
+            </div>
+
             <div className="modal-foot">
-              <button className="btn sm" onClick={() => setUpdate(null)} disabled={pct !== null}>
-                ภายหลัง
+              <button className="btn sm" onClick={loadReleases}>
+                <ArrowClockwise size={14} weight="bold" /> รีเฟรช
               </button>
-              <button className="btn primary sm" onClick={installUpdate} disabled={pct !== null}>
-                {pct === null ? "อัปเดตแล้วรีสตาร์ท" : `กำลังโหลด ${pct}%`}
+              <button
+                className="btn primary sm"
+                onClick={() => setUpdatesOpen(false)}
+                disabled={pct !== null}
+              >
+                ปิด
               </button>
             </div>
           </div>

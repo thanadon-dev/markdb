@@ -894,3 +894,77 @@ select:focus {
   font-family: "JetBrains Mono", Consolas, monospace;
   font-size: 12px;
 }
+
+.brand .verbtn {
+  margin-left: auto;
+}
+
+.newver {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: rgba(74, 222, 128, 0.09);
+  border: 1px solid rgba(74, 222, 128, 0.3);
+  color: #b9f6c7;
+  font-size: 12.5px;
+}
+
+.newver .bar {
+  flex: 1;
+  min-width: 120px;
+  margin-top: 0;
+}
+
+.newver .btn {
+  margin-left: auto;
+}
+
+.uptodate {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--dim);
+  font-size: 12.5px;
+}
+
+.relrow {
+  padding: 10px 12px;
+  border-bottom: 1px solid #141414;
+  font-size: 12px;
+  color: var(--dim);
+  user-select: text;
+}
+
+.relrow:last-child {
+  border-bottom: 0;
+}
+
+.reltop {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.reltop b {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.reltop i {
+  font-style: normal;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.relbody {
+  margin-top: 6px;
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
