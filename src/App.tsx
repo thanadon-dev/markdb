@@ -27,6 +27,7 @@ import {
   Eye,
   FloppyDisk,
   Lightning,
+  LinkSimple,
   MagnifyingGlass,
   PencilSimple,
   Play,
@@ -67,7 +68,13 @@ type ColumnInfo = {
   default: string;
   pk: boolean;
 };
-type TableProps = { columns: ColumnInfo[]; approx_rows: number; size: string };
+type Relation = { dir: "out" | "in"; name: string; other: string; def: string };
+type TableProps = {
+  columns: ColumnInfo[];
+  approx_rows: number;
+  size: string;
+  relations: Relation[];
+};
 type Release = { tag_name: string; name: string; published_at: string; body: string };
 
 const RELEASES_API = "https://api.github.com/repos/thanadon-dev/markdb/releases?per_page=20";
@@ -96,6 +103,8 @@ const BLANK: Conn = {
   db: "postgres",
   ssl: false,
 };
+
+const mb = (n: number) => (n / 1_048_576).toFixed(1);
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 const qname = (t: TableInfo) => `"${t.schema}"."${t.name}"`;
@@ -225,14 +234,18 @@ const Grid = memo(function Grid({
   res,
   pk,
   editable,
+  filter,
   onEdit,
   onCopy,
+  onSelect,
 }: {
   res: QueryResult;
   pk: string[];
   editable: boolean;
+  filter: string;
   onEdit: (rowIndex: number, column: string, value: string | null) => void;
   onCopy: (text: string) => void;
+  onSelect: (rowIndex: number) => void;
 }) {
   const parent = useRef<HTMLDivElement>(null);
   const [picked, setPicked] = useState("");
@@ -256,7 +269,13 @@ const Grid = memo(function Grid({
   /* เรียงลำดับฝั่ง client บน "ลำดับ index" ไม่ใช่ตัว rows — index เดิมจึงยังใช้อ้าง
      ตอนแก้ค่าได้ถูกแถว และไม่ต้องยิง query ใหม่ */
   const order = useMemo(() => {
-    const idx = res.rows.map((_, i) => i);
+    const q = filter.trim().toLowerCase();
+    let idx = res.rows.map((_, i) => i);
+    // กรองจากข้อมูลที่โหลดมาแล้ว ไม่ยิง query ใหม่ — พิมพ์แล้วเห็นผลทันที
+    if (q)
+      idx = idx.filter((i) =>
+        res.columns.some((c) => cellText(res.rows[i][c]).toLowerCase().includes(q)),
+      );
     if (!sort) return idx;
     const sign = sort.dir === "asc" ? 1 : -1;
     return idx.sort((a, b) => {
@@ -267,7 +286,7 @@ const Grid = memo(function Grid({
       if (an || bn) return an && bn ? 0 : an ? 1 : -1; // ค่าว่างไปท้ายเสมอ ไม่ว่าเรียงทางไหน
       return compare(va, vb) * sign;
     });
-  }, [res, sort]);
+  }, [res, sort, filter]);
 
   const rv = useVirtualizer({
     count: order.length,
@@ -312,6 +331,7 @@ const Grid = memo(function Grid({
           </div>
         ))}
       </div>
+      {!order.length && <div className="nomatch">ไม่มีแถวที่ตรงกับ “{filter}”</div>}
       <div className="grid-body" style={{ height: rv.getTotalSize() }}>
         {rv.getVirtualItems().map((vi) => {
           const ri = order[vi.index];
@@ -325,7 +345,10 @@ const Grid = memo(function Grid({
                 height: ROW_H,
                 transform: `translateY(${vi.start}px)`,
               }}
-              onClick={() => setSelRow(ri)}
+              onClick={() => {
+                setSelRow(ri);
+                onSelect(ri);
+              }}
             >
               {res.columns.map((c) => {
                 const id = `${ri}:${c}`;
@@ -408,6 +431,10 @@ export default function App() {
   const [updatesOpen, setUpdatesOpen] = useState(false);
   const [rels, setRels] = useState<Release[] | null>(null);
   const [relErr, setRelErr] = useState("");
+  const [gridFilter, setGridFilter] = useState("");
+  const [selRow, setSelRow] = useState(-1);
+  const [confirmDel, setConfirmDel] = useState<Record<string, unknown> | null>(null);
+  const [stage, setStage] = useState("");
   const [addRow, setAddRow] = useState<{ cols: ColumnInfo[]; vals: Record<string, string> } | null>(
     null,
   );
@@ -438,6 +465,11 @@ export default function App() {
             : "ผลลัพธ์ไม่มีคอลัมน์ primary key ครบ — แก้ค่าไม่ได้";
 
   const canAddRow = !!(tab?.source && tab.sql.includes(tab.source));
+
+  useEffect(() => {
+    setSelRow(-1);
+    setGridFilter("");
+  }, [tab?.id, tab?.res]);
 
   useEffect(() => setActiveTab((a) => a || tabs[0].id), [tabs]);
   useEffect(() => {
@@ -566,14 +598,34 @@ export default function App() {
     }
   }, [addRow, tab, run, say]);
 
+  const pkKeys = useCallback(
+    (row: Record<string, unknown>) =>
+      (tab?.pk ?? []).map((k) => ({
+        column: k,
+        value: row[k] === null || row[k] === undefined ? null : cellText(row[k]),
+      })),
+    [tab],
+  );
+
+  const doDelete = useCallback(async () => {
+    if (!confirmDel || !tab?.source) return;
+    const keys = pkKeys(confirmDel);
+    setConfirmDel(null);
+    try {
+      await invoke("delete_row", { table: tab.source, keys });
+      say("ลบแถวแล้ว");
+      setSelRow(-1);
+      run(tab.id, tab.sql);
+    } catch (e) {
+      say(String(e));
+    }
+  }, [confirmDel, tab, pkKeys, run, say]);
+
   const editCell = useCallback(
     async (rowIndex: number, column: string, value: string | null) => {
       if (!tab?.res || !tab.source || !tab.pk) return;
       const row = tab.res.rows[rowIndex];
-      const keys = tab.pk.map((k) => ({
-        column: k,
-        value: row[k] === null || row[k] === undefined ? null : cellText(row[k]),
-      }));
+      const keys = pkKeys(row);
       try {
         await invoke("update_cell", { table: tab.source, column, value, keys });
         const rows = tab.res.rows.slice();
@@ -584,7 +636,7 @@ export default function App() {
         say(String(e));
       }
     },
-    [tab, patch, say],
+    [tab, patch, pkKeys, say],
   );
 
   const addTab = useCallback(() => {
@@ -671,17 +723,26 @@ export default function App() {
     let total = 0;
     let got = 0;
     setPct(0);
+    setStage("กำลังเริ่มดาวน์โหลด…");
     try {
       await update.downloadAndInstall((e) => {
-        if (e.event === "Started") total = e.data.contentLength ?? 0;
-        else if (e.event === "Progress") {
+        if (e.event === "Started") {
+          total = e.data.contentLength ?? 0;
+          setStage("กำลังดาวน์โหลด");
+        } else if (e.event === "Progress") {
           got += e.data.chunkLength;
           setPct(total ? Math.round((got / total) * 100) : null);
-        } else if (e.event === "Finished") setPct(100);
+          setStage(`กำลังดาวน์โหลด ${mb(got)}${total ? ` / ${mb(total)}` : ""} MB`);
+        } else if (e.event === "Finished") {
+          setPct(100);
+          setStage("กำลังติดตั้ง…");
+        }
       });
+      setStage("กำลังรีสตาร์ท…");
       await relaunch();
     } catch (e) {
       setPct(null);
+      setStage("");
       setUpdate(null);
       say(String(e));
     }
@@ -945,6 +1006,8 @@ export default function App() {
             >
               {t.kind === "view" ? (
                 <Eye size={15} weight="duotone" />
+              ) : t.kind === "foreign" ? (
+                <LinkSimple size={15} weight="duotone" />
               ) : (
                 <TableIcon size={15} weight="duotone" />
               )}
@@ -1031,6 +1094,33 @@ export default function App() {
           >
             <RowsPlusBottom size={15} weight="duotone" /> Add row
           </button>
+          <button
+            className="btn sm"
+            onClick={() => selRow >= 0 && tab?.res && setConfirmDel(tab.res.rows[selRow])}
+            disabled={!editable || selRow < 0}
+            title={
+              !editable
+                ? "ลบได้เฉพาะตารางที่เปิดจากแถบซ้ายและมี primary key"
+                : selRow < 0
+                  ? "คลิกเลือกแถวก่อน"
+                  : "ลบแถวที่เลือก"
+            }
+          >
+            <Trash size={15} weight="duotone" /> Delete row
+          </button>
+          <div className="filterbox">
+            <MagnifyingGlass size={13} />
+            <input
+              placeholder="กรองในผลลัพธ์"
+              value={gridFilter}
+              onChange={(e) => setGridFilter(e.target.value)}
+            />
+            {gridFilter && (
+              <button onClick={() => setGridFilter("")} title="ล้าง">
+                <X size={11} weight="bold" />
+              </button>
+            )}
+          </div>
           <div className="spacer" />
           {editable ? (
             <span style={{ color: "var(--dim)", fontSize: 12 }}>
@@ -1068,7 +1158,9 @@ export default function App() {
             res={tab.res}
             pk={editable ? tab.pk! : []}
             editable={editable}
+            filter={gridFilter}
             onEdit={editCell}
+            onSelect={setSelRow}
             onCopy={(txt) => {
               navigator.clipboard?.writeText(txt);
               say("คัดลอกแล้ว");
@@ -1256,6 +1348,35 @@ export default function App() {
         </div>
       )}
 
+      {confirmDel && (
+        <div className="overlay" onClick={() => setConfirmDel(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>
+              <Trash size={17} weight="duotone" /> ลบแถวนี้?
+            </h3>
+            <p>ลบแล้วกู้คืนไม่ได้</p>
+            <div className="warn">
+              <div>
+                จาก <b>{tab?.source}</b>
+              </div>
+              <div className="path">
+                {(tab?.pk ?? [])
+                  .map((k) => `${k} = ${cellText(confirmDel[k])}`)
+                  .join("  ·  ")}
+              </div>
+            </div>
+            <div className="modal-foot">
+              <button className="btn sm" onClick={() => setConfirmDel(null)}>
+                ยกเลิก
+              </button>
+              <button className="btn primary sm danger" onClick={doDelete}>
+                ลบแถว
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {updatesOpen && (
         <div className="overlay" onClick={() => pct === null && setUpdatesOpen(false)}>
           <div className="modal wide" onClick={(e) => e.stopPropagation()}>
@@ -1264,18 +1385,33 @@ export default function App() {
             </h3>
             <p>ตอนนี้ใช้ v{version}</p>
 
-            {update ? (
+            {pct !== null ? (
+              <div className="installing">
+                <div className="ring">
+                  <svg viewBox="0 0 44 44">
+                    <circle cx="22" cy="22" r="19" className="track" />
+                    <circle
+                      cx="22"
+                      cy="22"
+                      r="19"
+                      className="fill"
+                      style={{ strokeDashoffset: 119.4 - (119.4 * pct) / 100 }}
+                    />
+                  </svg>
+                  <b>{pct}%</b>
+                </div>
+                <div className="istext">
+                  <b>{stage}</b>
+                  <span>อย่าปิดโปรแกรมระหว่างนี้ — เดี๋ยวเปิดกลับมาเองอัตโนมัติ</span>
+                </div>
+              </div>
+            ) : update ? (
               <div className="newver">
                 <div>
                   มีเวอร์ชันใหม่ <b>v{update.version}</b>
                 </div>
-                {pct !== null && (
-                  <div className="bar">
-                    <div style={{ width: `${pct}%` }} />
-                  </div>
-                )}
-                <button className="btn primary sm" onClick={installUpdate} disabled={pct !== null}>
-                  {pct === null ? "อัปเดตแล้วรีสตาร์ท" : `กำลังโหลด ${pct}%`}
+                <button className="btn primary sm" onClick={installUpdate}>
+                  อัปเดตแล้วรีสตาร์ท
                 </button>
               </div>
             ) : (
@@ -1424,6 +1560,37 @@ export default function App() {
                 </div>
               ))}
             </div>
+            <div className="side-label" style={{ paddingLeft: 0 }}>
+              ความสัมพันธ์ ({props.data.relations.length})
+            </div>
+            <div className="cols">
+              {!props.data.relations.length && (
+                <div className="relrow">ตารางนี้ไม่มี foreign key เชื่อมกับตารางไหน</div>
+              )}
+              {props.data.relations.map((r) => (
+                <button
+                  className="fkrow"
+                  key={r.dir + r.name}
+                  title={`เปิด ${r.other}`}
+                  onClick={() => {
+                    const [sc, nm] = r.other.replace(/"/g, "").split(".");
+                    openTable(
+                      nm
+                        ? { schema: sc, name: nm, kind: "table" }
+                        : { schema: "public", name: sc, kind: "table" },
+                    );
+                    setProps(null);
+                  }}
+                >
+                  <span className={"fkdir " + r.dir}>{r.dir === "out" ? "→" : "←"}</span>
+                  <span>
+                    <b>{r.other}</b>
+                    <em>{r.def}</em>
+                  </span>
+                </button>
+              ))}
+            </div>
+
             <div className="modal-foot">
               <button
                 className="btn sm"
