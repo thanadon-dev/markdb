@@ -37,6 +37,7 @@ import {
   Spinner,
   Table as TableIcon,
   Trash,
+  TreeStructure,
   UploadSimple,
   WarningCircle,
   X,
@@ -53,6 +54,7 @@ type QueryResult = {
 };
 type Tab = {
   id: string;
+  conn: string;
   title: string;
   sql: string;
   source?: string;
@@ -69,6 +71,7 @@ type ColumnInfo = {
   pk: boolean;
 };
 type Relation = { dir: "out" | "in"; name: string; other: string; def: string };
+type Edge = { src: string; src_cols: string; dst: string; dst_cols: string };
 type TableProps = {
   columns: ColumnInfo[];
   approx_rows: number;
@@ -132,8 +135,11 @@ const loadConns = (): Conn[] => {
   }
 };
 
-const newTab = (over: Partial<Tab> = {}): Tab => ({
+type Meta = { tables: TableInfo[]; schema: Record<string, string[]> };
+
+const newTab = (conn: string, over: Partial<Tab> = {}): Tab => ({
   id: uid(),
+  conn,
   title: "Query",
   sql: "",
   ...over,
@@ -227,6 +233,148 @@ const blackTheme = createTheme({
     { tag: t.punctuation, color: "#7a7a7a" },
   ],
 });
+
+/* ---------- ER diagram ---------- */
+
+const NW = 178;
+const NH = 34;
+const GX = 258;
+const GY = 56;
+
+/* วางตารางเป็นชั้น ๆ ตาม "ความลึกของการอ้างอิง": ตารางที่ไม่ชี้ไปหาใครอยู่ซ้ายสุด
+   ตารางที่ชี้ไปหามันอยู่ถัดมาทางขวา — อ่านทิศทางความสัมพันธ์ได้จากซ้ายไปขวา
+   ponytail: layout แบบชั้นธรรมดา ไม่ใช่ force-directed — เส้นอาจตัดกันบ้างถ้า FK เยอะมาก */
+const layout = (edges: Edge[]) => {
+  const names = [...new Set(edges.flatMap((e) => [e.src, e.dst]))].sort();
+  const out = new Map<string, string[]>(names.map((n) => [n, []]));
+  for (const e of edges) if (e.src !== e.dst) out.get(e.src)!.push(e.dst);
+
+  const depth = new Map<string, number>();
+  const busy = new Set<string>();
+  const calc = (n: string): number => {
+    const known = depth.get(n);
+    if (known !== undefined) return known;
+    if (busy.has(n)) return 0; // FK วนกลับมาหาตัวเอง — ตัดตรงนี้ไม่ให้ลูปไม่จบ
+    busy.add(n);
+    const kids = out.get(n) ?? [];
+    const d = kids.length ? 1 + Math.max(...kids.map(calc)) : 0;
+    busy.delete(n);
+    depth.set(n, d);
+    return d;
+  };
+  names.forEach(calc);
+
+  const perCol = new Map<number, number>();
+  const nodes = names.map((name) => {
+    const d = depth.get(name) ?? 0;
+    const row = perCol.get(d) ?? 0;
+    perCol.set(d, row + 1);
+    return { name, x: d * GX, y: row * GY, links: 0 };
+  });
+  const at = new Map(nodes.map((n) => [n.name, n]));
+  for (const e of edges) {
+    const a = at.get(e.src);
+    const b = at.get(e.dst);
+    if (a) a.links++;
+    if (b && b !== a) b.links++;
+  }
+
+  const w = Math.max(...nodes.map((n) => n.x + NW), 1) + 40;
+  const h = Math.max(...nodes.map((n) => n.y + NH), 1) + 40;
+  return { nodes, at, w, h };
+};
+
+function ErDiagram({ edges, onOpen }: { edges: Edge[]; onOpen: (t: string) => void }) {
+  const { nodes, at, w, h } = useMemo(() => layout(edges), [edges]);
+  const [view, setView] = useState({ x: 20, y: 20, k: 1 });
+  const [hot, setHot] = useState("");
+
+  if (!edges.length)
+    return <div className="empty">ยังไม่พบ foreign key ใน database นี้</div>;
+
+  const drag = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+    const v = view;
+    const move = (ev: MouseEvent) =>
+      setView({ ...v, x: v.x + ev.clientX - x0, y: v.y + ev.clientY - y0 });
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+
+  return (
+    <div
+      className="er"
+      onMouseDown={drag}
+      onWheel={(e) =>
+        setView((v) => ({ ...v, k: Math.min(2.4, Math.max(0.25, v.k * (e.deltaY < 0 ? 1.12 : 0.89))) }))
+      }
+    >
+      <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="xMidYMid meet">
+        <defs>
+          <marker id="tip" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M0,0 L8,4 L0,8 z" fill="#5a5a5a" />
+          </marker>
+        </defs>
+        <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
+          {edges.map((e, i) => {
+            const a = at.get(e.src)!;
+            const b = at.get(e.dst)!;
+            const on = hot === e.src || hot === e.dst;
+            if (a === b)
+              return (
+                <path
+                  key={i}
+                  className={"erlink" + (on ? " on" : "")}
+                  markerEnd="url(#tip)"
+                  d={`M${a.x + NW},${a.y + 10} c40,-16 40,32 0,16`}
+                />
+              );
+            const sx = a.x;
+            const sy = a.y + NH / 2;
+            const dx = b.x + NW;
+            const dy = b.y + NH / 2;
+            return (
+              <path
+                key={i}
+                className={"erlink" + (on ? " on" : "")}
+                markerEnd="url(#tip)"
+                d={`M${sx},${sy} C${sx - 70},${sy} ${dx + 70},${dy} ${dx},${dy}`}
+              >
+                <title>{`${e.src}.${e.src_cols} → ${e.dst}.${e.dst_cols}`}</title>
+              </path>
+            );
+          })}
+          {nodes.map((n) => (
+            <g
+              key={n.name}
+              className={"ernode" + (hot === n.name ? " on" : "")}
+              transform={`translate(${n.x},${n.y})`}
+              onMouseEnter={() => setHot(n.name)}
+              onMouseLeave={() => setHot("")}
+              onClick={() => onOpen(n.name)}
+            >
+              <rect width={NW} height={NH} rx="9" />
+              <text x="12" y={NH / 2 + 4}>
+                {n.name.length > 22 ? n.name.slice(0, 21) + "…" : n.name}
+              </text>
+              <text className="cnt" x={NW - 12} y={NH / 2 + 4} textAnchor="end">
+                {n.links}
+              </text>
+              <title>{`${n.name} — คลิกเพื่อเปิด`}</title>
+            </g>
+          ))}
+        </g>
+      </svg>
+      <div className="erhint">ลากเพื่อเลื่อน · สกรอลเพื่อซูม · คลิกตารางเพื่อเปิด</div>
+    </div>
+  );
+}
 
 /* ---------- result grid (memo: พิมพ์ใน editor แล้วตารางไม่ re-render) ---------- */
 
@@ -411,11 +559,10 @@ const Grid = memo(function Grid({
 export default function App() {
   const [conns, setConns] = useState<Conn[]>(loadConns);
   const [activeConn, setActiveConn] = useState<string>("");
-  const [tables, setTables] = useState<TableInfo[]>([]);
-  const [schema, setSchema] = useState<Record<string, string[]>>({});
+  const [live, setLive] = useState<Record<string, Meta>>({});
   const [filter, setFilter] = useState("");
   const [picked, setPicked] = useState<TableInfo | null>(null);
-  const [tabs, setTabs] = useState<Tab[]>([newTab()]);
+  const [tabs, setTabs] = useState<Tab[]>([newTab("")]);
   const [activeTab, setActiveTab] = useState<string>("");
   const [editorH, setEditorH] = useState(230);
   const [toast, setToast] = useState("");
@@ -435,13 +582,19 @@ export default function App() {
   const [selRow, setSelRow] = useState(-1);
   const [confirmDel, setConfirmDel] = useState<Record<string, unknown> | null>(null);
   const [stage, setStage] = useState("");
+  const [erOpen, setErOpen] = useState(false);
+  const [edges, setEdges] = useState<Edge[] | null>(null);
   const [addRow, setAddRow] = useState<{ cols: ColumnInfo[]; vals: Record<string, string> } | null>(
     null,
   );
   const [busy, setBusy] = useState(false);
 
   const tab = tabs.find((t) => t.id === activeTab) ?? tabs[0];
-  const connected = !!activeConn;
+  const tabConn = tab?.conn || activeConn;
+  const connected = !!live[activeConn];
+  // sidebar โชว์ของ connection ที่เลือกอยู่ ส่วน autocomplete ใช้ของ connection ที่แท็บผูกไว้
+  const tables = live[activeConn]?.tables ?? [];
+  const schema = live[tabConn]?.schema ?? {};
 
   /* แก้ค่าได้เฉพาะตอนที่ผลลัพธ์ยังมาจากตารางเดิม + มี pk ครบในผลลัพธ์
      (กันเคสแก้ query ไปชี้ตารางอื่นแล้ว UPDATE ลงผิดที่) */
@@ -490,38 +643,36 @@ export default function App() {
     [],
   );
 
-  const loadMeta = useCallback(async () => {
+  const loadMeta = useCallback(async (id: string) => {
     const [tbls, cols] = await Promise.all([
-      invoke<TableInfo[]>("list_tables"),
-      invoke<[string, string, string][]>("list_all_columns"),
+      invoke<TableInfo[]>("list_tables", { conn: id }),
+      invoke<[string, string, string][]>("list_all_columns", { conn: id }),
     ]);
-    setTables(tbls);
     const map: Record<string, string[]> = {};
     for (const [s, t, c] of cols) {
       (map[`${s}.${t}`] ??= []).push(c);
       (map[t] ??= []).push(c);
     }
-    setSchema(map);
+    setLive((l) => ({ ...l, [id]: { tables: tbls, schema: map } }));
   }, []);
 
   const refresh = useCallback(async () => {
     try {
-      await loadMeta();
+      await loadMeta(activeConn);
     } catch (e) {
       say(String(e));
     }
-  }, [loadMeta, say]);
+  }, [loadMeta, activeConn, say]);
 
   const doConnect = useCallback(
     async (c: Conn) => {
       setBusy(true);
       try {
-        await invoke<string>("connect", { url: connUrl(c) });
+        await invoke<string>("connect", { conn: c.id, url: connUrl(c) });
         setActiveConn(c.id);
-        await loadMeta();
+        await loadMeta(c.id);
         say(`เชื่อมต่อ ${c.name} แล้ว`);
       } catch (e) {
-        setActiveConn("");
         say(String(e));
       } finally {
         setBusy(false);
@@ -530,40 +681,51 @@ export default function App() {
     [loadMeta, say],
   );
 
+  const dropConn = useCallback(async (id: string) => {
+    await invoke("disconnect", { conn: id }).catch(() => {});
+    setLive((l) => {
+      const rest = { ...l };
+      delete rest[id];
+      setActiveConn((a) => (a === id ? (Object.keys(rest)[0] ?? "") : a));
+      return rest;
+    });
+  }, []);
+
   const run = useCallback(
-    async (id: string, sqlText: string) => {
-      if (!connected) return say("ยังไม่ได้เชื่อมต่อ");
+    async (id: string, sqlText: string, connId?: string) => {
+      const c = connId ?? tabs.find((t) => t.id === id)?.conn ?? activeConn;
+      if (!live[c]) return say("แท็บนี้ยังไม่ได้เชื่อมต่อ");
       if (!sqlText.trim()) return;
       patch(id, { running: true, err: undefined });
       try {
-        const res = await invoke<QueryResult>("run_query", { sql: sqlText });
+        const res = await invoke<QueryResult>("run_query", { conn: c, sql: sqlText });
         patch(id, { res, running: false });
       } catch (e) {
         patch(id, { err: String(e), running: false, res: undefined });
       }
     },
-    [connected, patch, say],
+    [tabs, live, activeConn, patch, say],
   );
 
   const openTable = useCallback(
     (t: TableInfo) => {
       const src = qname(t);
       const q = `select *\nfrom ${src}\nlimit 500;`;
-      const nt = newTab({ title: t.name, sql: q, source: src });
+      const nt = newTab(activeConn, { title: t.name, sql: q, source: src });
       setTabs((ts) => [...ts, nt]);
       setActiveTab(nt.id);
-      run(nt.id, q);
-      invoke<string[]>("list_pk", { table: src })
+      run(nt.id, q, activeConn);
+      invoke<string[]>("list_pk", { conn: activeConn, table: src })
         .then((pk) => patch(nt.id, { pk }))
         .catch(() => patch(nt.id, { pk: [] }));
     },
-    [run, patch],
+    [run, patch, activeConn],
   );
 
   const showProps = useCallback(
     async (t: TableInfo) => {
       try {
-        setProps({ table: t, data: await invoke<TableProps>("table_props", { table: qname(t) }) });
+        setProps({ table: t, data: await invoke<TableProps>("table_props", { conn: activeConn, table: qname(t) }) });
       } catch (e) {
         say(String(e));
       }
@@ -575,7 +737,7 @@ export default function App() {
   const openAddRow = useCallback(async () => {
     if (!tab?.source) return;
     try {
-      const props = await invoke<TableProps>("table_props", { table: tab.source });
+      const props = await invoke<TableProps>("table_props", { conn: tab.conn, table: tab.source });
       setAddRow({ cols: props.columns, vals: {} });
     } catch (e) {
       say(String(e));
@@ -589,7 +751,7 @@ export default function App() {
       .filter(([, v]) => v !== "")
       .map(([column, v]) => ({ column, value: v.toUpperCase() === "NULL" ? null : v }));
     try {
-      await invoke("insert_row", { table: tab.source, values });
+      await invoke("insert_row", { conn: tab.conn, table: tab.source, values });
       setAddRow(null);
       say("เพิ่มแถวแล้ว");
       run(tab.id, tab.sql);
@@ -597,6 +759,17 @@ export default function App() {
       say(String(e));
     }
   }, [addRow, tab, run, say]);
+
+  const openEr = useCallback(async () => {
+    setErOpen(true);
+    setEdges(null);
+    try {
+      setEdges(await invoke<Edge[]>("er_edges", { conn: activeConn }));
+    } catch (e) {
+      setErOpen(false);
+      say(String(e));
+    }
+  }, [activeConn, say]);
 
   const pkKeys = useCallback(
     (row: Record<string, unknown>) =>
@@ -612,7 +785,7 @@ export default function App() {
     const keys = pkKeys(confirmDel);
     setConfirmDel(null);
     try {
-      await invoke("delete_row", { table: tab.source, keys });
+      await invoke("delete_row", { conn: tab.conn, table: tab.source, keys });
       say("ลบแถวแล้ว");
       setSelRow(-1);
       run(tab.id, tab.sql);
@@ -627,7 +800,7 @@ export default function App() {
       const row = tab.res.rows[rowIndex];
       const keys = pkKeys(row);
       try {
-        await invoke("update_cell", { table: tab.source, column, value, keys });
+        await invoke("update_cell", { conn: tab.conn, table: tab.source, column, value, keys });
         const rows = tab.res.rows.slice();
         rows[rowIndex] = { ...row, [column]: value };
         patch(tab.id, { res: { ...tab.res, rows } });
@@ -640,15 +813,15 @@ export default function App() {
   );
 
   const addTab = useCallback(() => {
-    const nt = newTab();
+    const nt = newTab(activeConn);
     setTabs((ts) => [...ts, nt]);
     setActiveTab(nt.id);
-  }, []);
+  }, [activeConn]);
 
   const closeTab = useCallback((id: string) => {
     setTabs((ts) => {
       const left = ts.filter((t) => t.id !== id);
-      const next = left.length ? left : [newTab()];
+      const next = left.length ? left : [newTab("")];
       setActiveTab((a) => (a === id ? next[next.length - 1].id : a));
       return next;
     });
@@ -772,7 +945,7 @@ export default function App() {
     setBusy(true);
     say("กำลัง backup… ตารางใหญ่อาจใช้เวลาสักครู่");
     try {
-      say(`backup เสร็จ — ${await invoke<string>("backup_database", { path })}`);
+      say(`backup เสร็จ — ${await invoke<string>("backup_database", { conn: activeConn, path })}`);
     } catch (e) {
       say(String(e));
     } finally {
@@ -812,13 +985,13 @@ export default function App() {
     setBusy(true);
     try {
       if (path.toLowerCase().endsWith(".sql")) {
-        await invoke("import_sql", { path });
+        await invoke("import_sql", { conn: activeConn, path });
         say("รันไฟล์ SQL เรียบร้อย");
         refresh();
       } else if (!picked) {
         say("เลือกตารางปลายทางในแถบซ้ายก่อน");
       } else {
-        const n = await invoke<number>("import_csv", { path, table: qname(picked) });
+        const n = await invoke<number>("import_csv", { conn: activeConn, path, table: qname(picked) });
         say(`นำเข้า ${n} แถว → ${picked.name}`);
       }
     } catch (e) {
@@ -883,6 +1056,7 @@ export default function App() {
       if (!m) return null;
       try {
         const vals = await invoke<string[]>("column_values", {
+          conn: tabConn,
           table: src,
           column: m[1],
           prefix: m[2],
@@ -904,7 +1078,7 @@ export default function App() {
       autocompletion({ defaultKeymap: false }),
       completionKeys,
     ];
-  }, [schema, ctx.schema, ctx.table]);
+  }, [schema, ctx.schema, ctx.table, tabConn]);
 
   return (
     <div className="app">
@@ -932,10 +1106,23 @@ export default function App() {
               key={c.id}
               className={"conn" + (activeConn === c.id ? " on" : "")}
               title={connUrl(c)}
-              onClick={() => doConnect(c)}
+              onClick={() => (live[c.id] ? setActiveConn(c.id) : doConnect(c))}
             >
               <Database size={15} weight="duotone" />
               <span>{c.name}</span>
+              <span className={"cdot" + (live[c.id] ? " on" : "")} />
+              {live[c.id] && (
+                <span
+                  className="x"
+                  title="ตัดการเชื่อมต่อ"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    dropConn(c.id);
+                  }}
+                >
+                  <Plug size={13} />
+                </span>
+              )}
               <span
                 className="x"
                 title="แก้ไข"
@@ -953,6 +1140,7 @@ export default function App() {
                 title="ลบ"
                 onClick={(e) => {
                   e.stopPropagation();
+                  dropConn(c.id);
                   setConns((cs) => cs.filter((x) => x.id !== c.id));
                 }}
               >
@@ -970,6 +1158,9 @@ export default function App() {
         <div className="side-section" style={{ paddingBottom: 0 }}>
           <div className="side-label">
             <TableIcon size={13} weight="duotone" /> tables ({shown.length})
+            <button title="ER diagram" onClick={openEr} disabled={!connected}>
+              <TreeStructure size={14} weight="bold" />
+            </button>
             <button title="รีเฟรช" onClick={refresh}>
               <ArrowClockwise size={14} weight="bold" />
             </button>
@@ -1062,6 +1253,9 @@ export default function App() {
                 <Lightning size={13} weight="duotone" />
               )}
               <span>{t.title}</span>
+              {t.conn !== activeConn && conns.find((c) => c.id === t.conn) && (
+                <em className="tabconn">{conns.find((c) => c.id === t.conn)!.name}</em>
+              )}
               <span
                 className="x"
                 onClick={(e) => {
@@ -1344,6 +1538,37 @@ export default function App() {
                 เพิ่มแถว
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {erOpen && (
+        <div className="overlay" onClick={() => setErOpen(false)}>
+          <div className="modal ermodal" onClick={(e) => e.stopPropagation()}>
+            <h3>
+              <TreeStructure size={17} weight="duotone" /> ER diagram
+              <button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={() => setErOpen(false)}>
+                <X size={14} weight="bold" />
+              </button>
+            </h3>
+            {edges === null ? (
+              <div className="empty">
+                <Spinner size={26} className="spin" />
+                <div>กำลังอ่านความสัมพันธ์…</div>
+              </div>
+            ) : (
+              <ErDiagram
+                edges={edges}
+                onOpen={(name) => {
+                  const clean = name.replace(/"/g, "");
+                  const [a, b] = clean.split(".");
+                  openTable(
+                    b ? { schema: a, name: b, kind: "table" } : { schema: "public", name: a, kind: "table" },
+                  );
+                  setErOpen(false);
+                }}
+              />
+            )}
           </div>
         </div>
       )}
