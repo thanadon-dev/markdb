@@ -968,3 +968,172 @@ select:focus {
   white-space: pre-wrap;
   line-height: 1.6;
 }
+
+/* ---------- filter ในผลลัพธ์ ---------- */
+
+.filterbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0a0a0a;
+  color: var(--dim);
+  height: 28px;
+  width: 190px;
+}
+
+.filterbox:focus-within {
+  border-color: #555;
+}
+
+.filterbox input {
+  border: 0;
+  background: none;
+  padding: 0;
+  height: 100%;
+  font-size: 12px;
+}
+
+.filterbox input:focus {
+  box-shadow: none;
+}
+
+.filterbox button {
+  color: var(--dim);
+  display: flex;
+  padding: 2px;
+  border-radius: 4px;
+}
+
+.filterbox button:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.nomatch {
+  padding: 22px;
+  text-align: center;
+  color: var(--dim);
+  font-size: 12.5px;
+}
+
+/* ---------- ความสัมพันธ์ (foreign key) ---------- */
+
+.fkrow {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  padding: 9px 12px;
+  border-bottom: 1px solid #141414;
+  color: var(--text);
+}
+
+.fkrow:last-child {
+  border-bottom: 0;
+}
+
+.fkrow:hover {
+  background: var(--panel);
+}
+
+.fkdir {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  background: var(--panel-2);
+  color: var(--dim);
+}
+
+.fkrow:hover .fkdir {
+  color: var(--text);
+}
+
+.fkrow b {
+  display: block;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 12.5px;
+}
+
+.fkrow em {
+  display: block;
+  margin-top: 3px;
+  font-style: normal;
+  font-size: 11px;
+  color: var(--dim);
+  font-family: "JetBrains Mono", Consolas, monospace;
+  word-break: break-word;
+}
+
+/* ---------- หน้าจอตอนกำลังอัปเดต ---------- */
+
+.installing {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 22px 20px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+
+.ring {
+  position: relative;
+  width: 62px;
+  height: 62px;
+  flex: none;
+}
+
+.ring svg {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+
+.ring circle {
+  fill: none;
+  stroke-width: 3.5;
+  stroke-linecap: round;
+}
+
+.ring .track {
+  stroke: #262626;
+}
+
+.ring .fill {
+  stroke: #fff;
+  stroke-dasharray: 119.4;
+  transition: stroke-dashoffset 0.25s ease;
+}
+
+.ring b {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.istext {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.istext b {
+  font-size: 13.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.istext span {
+  color: var(--dim);
+  font-size: 11.5px;
+}

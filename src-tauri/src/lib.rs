@@ -95,7 +95,11 @@ async fn list_tables(state: tauri::State<'_, AppState>) -> R<Vec<TableInfo>> {
         .map(|(schema, name, t)| TableInfo {
             schema,
             name,
-            kind: if t == "VIEW" { "view".into() } else { "table".into() },
+            kind: match t.as_str() {
+                "VIEW" => "view".into(),
+                "FOREIGN" => "foreign".into(),
+                _ => "table".into(),
+            },
         })
         .collect())
 }
@@ -140,10 +144,19 @@ struct ColumnInfo {
 }
 
 #[derive(Serialize)]
+struct Relation {
+    dir: String,   // "out" = ตารางนี้ชี้ไปหาคนอื่น, "in" = คนอื่นชี้มาหาตารางนี้
+    name: String,
+    other: String,
+    def: String,
+}
+
+#[derive(Serialize)]
 struct TableProps {
     columns: Vec<ColumnInfo>,
     approx_rows: i64,
     size: String,
+    relations: Vec<Relation>,
 }
 
 /// properties ของตาราง — อ่านจาก pg_catalog ล้วน ไม่แตะข้อมูลจริงสักแถว
@@ -179,7 +192,32 @@ async fn table_props(table: String, state: tauri::State<'_, AppState>) -> R<Tabl
     .await
     .map_err(err)?;
 
+    let rels: Vec<(String, String, String, String)> = sqlx::query_as(
+        "select case when con.conrelid = $1::regclass then 'out' else 'in' end,
+                con.conname,
+                (case when con.conrelid = $1::regclass then con.confrelid else con.conrelid end)
+                    ::regclass::text,
+                pg_get_constraintdef(con.oid)
+         from pg_constraint con
+         where con.contype = 'f'
+           and (con.conrelid = $1::regclass or con.confrelid = $1::regclass)
+         order by 1, 2",
+    )
+    .bind(&table)
+    .fetch_all(&p)
+    .await
+    .map_err(err)?;
+
     Ok(TableProps {
+        relations: rels
+            .into_iter()
+            .map(|(dir, name, other, def)| Relation {
+                dir,
+                name,
+                other,
+                def,
+            })
+            .collect(),
         columns: cols
             .into_iter()
             .map(|(name, data_type, nullable, default, pk)| ColumnInfo {
@@ -290,6 +328,41 @@ async fn insert_row(
             Err(err(e))
         }
     }
+}
+
+/// ลบแถวผ่าน primary key — เงื่อนไขต้องตรงพอดี 1 แถว ไม่งั้น rollback
+#[tauri::command]
+async fn delete_row(
+    table: String,
+    keys: Vec<KeyVal>,
+    state: tauri::State<'_, AppState>,
+) -> R<u64> {
+    if keys.is_empty() {
+        return Err("ตารางนี้ไม่มี primary key จึงลบแถวตรง ๆ ไม่ได้".into());
+    }
+    let p = pool(&state).await?;
+    let where_sql = keys
+        .iter()
+        .map(|k| match &k.value {
+            None => format!("{} is null", ident(&k.column)),
+            v => format!("{} = {}", ident(&k.column), lit(v)),
+        })
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let sql = format!("delete from {} where {}", table, where_sql);
+
+    let mut tx = p.begin().await.map_err(err)?;
+    let n = sqlx::query(&sql)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?
+        .rows_affected();
+    if n != 1 {
+        tx.rollback().await.ok();
+        return Err(format!("เงื่อนไขตรง {} แถว (ต้องเป็น 1) — ยกเลิกการลบ", n));
+    }
+    tx.commit().await.map_err(err)?;
+    Ok(n)
 }
 
 /// แก้ค่า cell เดียวผ่าน primary key — รันใน transaction แล้วยืนยันว่าโดนแค่ 1 แถว
@@ -753,6 +826,7 @@ pub fn run() {
             table_props,
             update_cell,
             insert_row,
+            delete_row,
             run_query,
             export_csv,
             export_sql,
