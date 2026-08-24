@@ -1137,3 +1137,115 @@ select:focus {
   color: var(--dim);
   font-size: 11.5px;
 }
+
+/* ---------- สถานะ connection ---------- */
+
+.cdot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #333;
+  flex: none;
+  margin-left: 6px;
+}
+
+.cdot.on {
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green);
+}
+
+.conn:hover .cdot {
+  display: none;
+}
+
+.tabconn {
+  font-style: normal;
+  font-size: 9.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--dim);
+  flex: none;
+}
+
+/* ---------- ER diagram ---------- */
+
+.ermodal {
+  width: min(1180px, 94vw);
+  height: 86vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.ermodal h3 {
+  margin-bottom: 12px;
+}
+
+.er {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #050505;
+  overflow: hidden;
+  cursor: grab;
+}
+
+.er:active {
+  cursor: grabbing;
+}
+
+.er svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.erlink {
+  fill: none;
+  stroke: #3a3a3a;
+  stroke-width: 1.4;
+}
+
+.erlink.on {
+  stroke: #fff;
+  stroke-width: 2;
+}
+
+.ernode rect {
+  fill: #131313;
+  stroke: #2e2e2e;
+  stroke-width: 1.2;
+}
+
+.ernode text {
+  fill: var(--text);
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.ernode text.cnt {
+  fill: var(--dim);
+  font-size: 10.5px;
+}
+
+.ernode {
+  cursor: pointer;
+}
+
+.ernode:hover rect,
+.ernode.on rect {
+  fill: #1f1f1f;
+  stroke: #fff;
+}
+
+.erhint {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  font-size: 11px;
+  color: var(--dim);
+  pointer-events: none;
+}

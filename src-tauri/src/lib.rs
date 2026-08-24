@@ -1,13 +1,15 @@
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgPool, PgPoolCopyExt, PgPoolOptions};
 use sqlx::{Column, Executor};
+use std::collections::HashMap;
 use std::time::Instant;
 use tokio::sync::Mutex;
 
 const MAX_ROWS: usize = 5000;
 
+/// หลาย connection พร้อมกัน — key คือ id ของ connection ฝั่ง UI
 struct AppState {
-    pool: Mutex<Option<PgPool>>,
+    pools: Mutex<HashMap<String, PgPool>>,
 }
 
 #[derive(Serialize)]
@@ -32,17 +34,19 @@ fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
-async fn pool(state: &AppState) -> R<PgPool> {
+async fn pool(state: &AppState, conn: &str) -> R<PgPool> {
     state
-        .pool
+        .pools
         .lock()
         .await
-        .clone()
-        .ok_or_else(|| "ยังไม่ได้เชื่อมต่อฐานข้อมูล".to_string())
+        .get(conn)
+        .cloned()
+        .ok_or_else(|| "connection นี้ยังไม่ได้เชื่อมต่อ".to_string())
 }
 
 #[tauri::command]
-async fn connect(url: String, state: tauri::State<'_, AppState>) -> R<String> {
+async fn connect(url: String, conn: String,
+    state: tauri::State<'_, AppState>) -> R<String> {
     let p = PgPoolOptions::new()
         .max_connections(4)
         .connect(&url)
@@ -52,7 +56,7 @@ async fn connect(url: String, state: tauri::State<'_, AppState>) -> R<String> {
         .fetch_one(&p)
         .await
         .map_err(err)?;
-    *state.pool.lock().await = Some(p);
+    state.pools.lock().await.insert(conn, p);
     Ok(ver)
 }
 
@@ -71,16 +75,18 @@ async fn test_connection(url: String) -> R<String> {
 }
 
 #[tauri::command]
-async fn disconnect(state: tauri::State<'_, AppState>) -> R<()> {
-    if let Some(p) = state.pool.lock().await.take() {
+async fn disconnect(conn: String,
+    state: tauri::State<'_, AppState>) -> R<()> {
+    if let Some(p) = state.pools.lock().await.remove(&conn) {
         p.close().await;
     }
     Ok(())
 }
 
 #[tauri::command]
-async fn list_tables(state: tauri::State<'_, AppState>) -> R<Vec<TableInfo>> {
-    let p = pool(&state).await?;
+async fn list_tables(conn: String,
+    state: tauri::State<'_, AppState>) -> R<Vec<TableInfo>> {
+    let p = pool(&state, &conn).await?;
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "select table_schema, table_name, table_type
          from information_schema.tables
@@ -106,8 +112,9 @@ async fn list_tables(state: tauri::State<'_, AppState>) -> R<Vec<TableInfo>> {
 
 /// (schema, table, column) ทั้ง database — ใช้ป้อน autocomplete ฝั่ง editor
 #[tauri::command]
-async fn list_all_columns(state: tauri::State<'_, AppState>) -> R<Vec<(String, String, String)>> {
-    let p = pool(&state).await?;
+async fn list_all_columns(conn: String,
+    state: tauri::State<'_, AppState>) -> R<Vec<(String, String, String)>> {
+    let p = pool(&state, &conn).await?;
     sqlx::query_as(
         "select table_schema, table_name, column_name from information_schema.columns
          where table_schema not in ('pg_catalog','information_schema')
@@ -120,8 +127,9 @@ async fn list_all_columns(state: tauri::State<'_, AppState>) -> R<Vec<(String, S
 
 /// คอลัมน์ที่เป็น primary key ของตาราง — ว่าง = แก้ค่าในตารางไม่ได้
 #[tauri::command]
-async fn list_pk(table: String, state: tauri::State<'_, AppState>) -> R<Vec<String>> {
-    let p = pool(&state).await?;
+async fn list_pk(table: String, conn: String,
+    state: tauri::State<'_, AppState>) -> R<Vec<String>> {
+    let p = pool(&state, &conn).await?;
     let rows: Vec<(String,)> = sqlx::query_as(
         "select a.attname from pg_index i
          join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
@@ -162,8 +170,9 @@ struct TableProps {
 /// properties ของตาราง — อ่านจาก pg_catalog ล้วน ไม่แตะข้อมูลจริงสักแถว
 /// (reltuples เป็นค่าประมาณจาก ANALYZE ล่าสุด จึงไม่ต้อง count ทั้งตาราง)
 #[tauri::command]
-async fn table_props(table: String, state: tauri::State<'_, AppState>) -> R<TableProps> {
-    let p = pool(&state).await?;
+async fn table_props(table: String, conn: String,
+    state: tauri::State<'_, AppState>) -> R<TableProps> {
+    let p = pool(&state, &conn).await?;
     let cols: Vec<(String, String, bool, String, bool)> = sqlx::query_as(
         "select a.attname,
                 format_type(a.atttypid, a.atttypmod),
@@ -233,6 +242,47 @@ async fn table_props(table: String, state: tauri::State<'_, AppState>) -> R<Tabl
     })
 }
 
+#[derive(Serialize)]
+struct Edge {
+    src: String,
+    src_cols: String,
+    dst: String,
+    dst_cols: String,
+}
+
+/// FK ทุกเส้นใน database — ใช้วาด ER diagram
+#[tauri::command]
+async fn er_edges(conn: String, state: tauri::State<'_, AppState>) -> R<Vec<Edge>> {
+    let p = pool(&state, &conn).await?;
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "select con.conrelid::regclass::text,
+                (select string_agg(a.attname, ', ' order by k.ord)
+                   from unnest(con.conkey) with ordinality k(attnum, ord)
+                   join pg_attribute a on a.attrelid = con.conrelid and a.attnum = k.attnum),
+                con.confrelid::regclass::text,
+                (select string_agg(a.attname, ', ' order by k.ord)
+                   from unnest(con.confkey) with ordinality k(attnum, ord)
+                   join pg_attribute a on a.attrelid = con.confrelid and a.attnum = k.attnum)
+         from pg_constraint con
+         join pg_class c on c.oid = con.conrelid
+         join pg_namespace n on n.oid = c.relnamespace
+         where con.contype = 'f' and n.nspname not in ('pg_catalog','information_schema')
+         order by 1, 3",
+    )
+    .fetch_all(&p)
+    .await
+    .map_err(err)?;
+    Ok(rows
+        .into_iter()
+        .map(|(src, src_cols, dst, dst_cols)| Edge {
+            src,
+            src_cols,
+            dst,
+            dst_cols,
+        })
+        .collect())
+}
+
 fn ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
@@ -254,6 +304,7 @@ async fn column_values(
     table: String,
     column: String,
     prefix: String,
+    conn: String,
     state: tauri::State<'_, AppState>,
 ) -> R<Vec<String>> {
     if !table
@@ -262,7 +313,7 @@ async fn column_values(
     {
         return Err("ชื่อตารางไม่ถูกต้อง".into());
     }
-    let p = pool(&state).await?;
+    let p = pool(&state, &conn).await?;
     let sql = format!(
         "select {c}::text as v from {t}
          where {c} is not null and {c}::text ilike $1
@@ -295,9 +346,10 @@ struct KeyVal {
 async fn insert_row(
     table: String,
     values: Vec<KeyVal>,
+    conn: String,
     state: tauri::State<'_, AppState>,
 ) -> R<u64> {
-    let p = pool(&state).await?;
+    let p = pool(&state, &conn).await?;
     let sql = if values.is_empty() {
         format!("insert into {} default values", table)
     } else {
@@ -335,12 +387,13 @@ async fn insert_row(
 async fn delete_row(
     table: String,
     keys: Vec<KeyVal>,
+    conn: String,
     state: tauri::State<'_, AppState>,
 ) -> R<u64> {
     if keys.is_empty() {
         return Err("ตารางนี้ไม่มี primary key จึงลบแถวตรง ๆ ไม่ได้".into());
     }
-    let p = pool(&state).await?;
+    let p = pool(&state, &conn).await?;
     let where_sql = keys
         .iter()
         .map(|k| match &k.value {
@@ -373,12 +426,13 @@ async fn update_cell(
     column: String,
     value: Option<String>,
     keys: Vec<KeyVal>,
+    conn: String,
     state: tauri::State<'_, AppState>,
 ) -> R<u64> {
     if keys.is_empty() {
         return Err("ตารางนี้ไม่มี primary key จึงแก้ค่าตรง ๆ ไม่ได้".into());
     }
-    let p = pool(&state).await?;
+    let p = pool(&state, &conn).await?;
     let where_sql = keys
         .iter()
         .map(|k| match &k.value {
@@ -426,8 +480,9 @@ fn is_read_query(sql: &str) -> bool {
 // ราคาที่จ่ายคือทั้งชุดอยู่ใน memory ครั้งเดียว จึงตัดที่ MAX_ROWS
 // อยาก stream ระดับล้านแถวค่อยเปลี่ยนไป decode raw + server-side cursor
 #[tauri::command]
-async fn run_query(sql: String, state: tauri::State<'_, AppState>) -> R<QueryResult> {
-    let p = pool(&state).await?;
+async fn run_query(sql: String, conn: String,
+    state: tauri::State<'_, AppState>) -> R<QueryResult> {
+    let p = pool(&state, &conn).await?;
     let t0 = Instant::now();
     let trimmed = sql.trim().trim_end_matches(';').trim().to_string();
     if trimmed.is_empty() {
@@ -539,8 +594,9 @@ fn export_sql(
 // และเร็วกว่า INSERT ทีละแถวหลายสิบเท่า โดยไม่ต้อง parse CSV ฝั่ง Rust
 // รองรับ header ธรรมดา ไม่รองรับ comma ในชื่อคอลัมน์ — เจอค่อยใช้ csv crate อ่าน header
 #[tauri::command]
-async fn import_csv(path: String, table: String, state: tauri::State<'_, AppState>) -> R<u64> {
-    let p = pool(&state).await?;
+async fn import_csv(path: String, table: String, conn: String,
+    state: tauri::State<'_, AppState>) -> R<u64> {
+    let p = pool(&state, &conn).await?;
     let bytes = std::fs::read(&path).map_err(err)?;
     let header = String::from_utf8_lossy(&bytes)
         .lines()
@@ -569,12 +625,13 @@ async fn import_csv(path: String, table: String, state: tauri::State<'_, AppStat
 // ส่วน data stream ทีละแถวด้วย row_to_json แล้วเขียนลงไฟล์เลย ไม่กองใน memory
 // ไม่ครอบคลุม: trigger, function, extension, grant, partition — ถ้าต้องใช้ให้ลง pg_dump แทน
 #[tauri::command]
-async fn backup_database(path: String, state: tauri::State<'_, AppState>) -> R<String> {
+async fn backup_database(path: String, conn: String,
+    state: tauri::State<'_, AppState>) -> R<String> {
     use futures_util::TryStreamExt;
     use std::io::Write;
 
     const BATCH: usize = 100;
-    let p = pool(&state).await?;
+    let p = pool(&state, &conn).await?;
     let f = std::fs::File::create(&path).map_err(err)?;
     let mut out = std::io::BufWriter::new(f);
 
@@ -784,8 +841,9 @@ async fn backup_database(path: String, state: tauri::State<'_, AppState>) -> R<S
 /// ทุกอย่างอยู่ใน transaction เดียว — Postgres รองรับ DDL ใน transaction จึง rollback
 /// ได้ทั้งก้อนถ้าพังกลางทาง ไม่ทิ้ง database ค้างครึ่ง ๆ กลาง ๆ
 #[tauri::command]
-async fn import_sql(path: String, state: tauri::State<'_, AppState>) -> R<u64> {
-    let p = pool(&state).await?;
+async fn import_sql(path: String, conn: String,
+    state: tauri::State<'_, AppState>) -> R<u64> {
+    let p = pool(&state, &conn).await?;
     let text = std::fs::read_to_string(&path).map_err(err)?;
     // ครอบ BEGIN/COMMIT ในตัว SQL เอง: ถ้ามี statement ไหนพัง Postgres จะ abort ทั้ง
     // transaction แล้ว COMMIT กลายเป็น ROLLBACK ให้เอง — ได้ผลเท่ากับ tx ฝั่ง client
@@ -813,7 +871,7 @@ pub fn run() {
 
     builder
         .manage(AppState {
-            pool: Mutex::new(None),
+            pools: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             connect,
@@ -822,6 +880,7 @@ pub fn run() {
             list_tables,
             list_all_columns,
             list_pk,
+            er_edges,
             column_values,
             table_props,
             update_cell,
