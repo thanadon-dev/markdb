@@ -4,7 +4,8 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
-import CodeMirror from "@uiw/react-codemirror";
+import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
+import { stmtAt } from "./sqlsplit";
 import { PostgreSQL, sql as sqlLang } from "@codemirror/lang-sql";
 import { createTheme } from "@uiw/codemirror-themes";
 import { tags as t } from "@lezer/highlight";
@@ -214,8 +215,8 @@ const blackTheme = createTheme({
     background: "#000000",
     foreground: "#ffffff",
     caret: "#ffffff",
-    selection: "#2e2e2e",
-    selectionMatch: "#2e2e2e",
+    selection: "#2f5d9e",
+    selectionMatch: "#1d3a63",
     lineHighlight: "#0b0b0b",
     gutterBackground: "#000000",
     gutterForeground: "#4a4a4a",
@@ -565,6 +566,8 @@ export default function App() {
   const [tabs, setTabs] = useState<Tab[]>([newTab("")]);
   const [activeTab, setActiveTab] = useState<string>("");
   const [editorH, setEditorH] = useState(230);
+  const [hasSel, setHasSel] = useState(false);
+  const cmRef = useRef<ReactCodeMirrorRef>(null);
   const [toast, setToast] = useState("");
   const [form, setForm] = useState<Conn | null>(null);
   const [props, setProps] = useState<{ table: TableInfo; data: TableProps } | null>(null);
@@ -1001,6 +1004,16 @@ export default function App() {
     }
   }, [connected, picked, refresh, say]);
 
+  /* ลากคลุมไว้ = รันเฉพาะที่คลุม, ไม่ได้คลุม = รันเฉพาะคำสั่งที่เคอร์เซอร์อยู่ */
+  const runNow = useCallback(() => {
+    if (!tab) return;
+    const st = cmRef.current?.view?.state;
+    if (!st) return run(tab.id, tab.sql);
+    const { from, to, head } = st.selection.main;
+    const sel = st.sliceDoc(from, to).trim();
+    run(tab.id, sel || stmtAt(st.doc.toString(), head));
+  }, [tab, run]);
+
   /* keyboard: Ctrl+Enter รัน, Ctrl+N แท็บใหม่ */
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -1010,7 +1023,7 @@ export default function App() {
         e.preventDefault();
       } else if (e.key === "Enter") {
         e.preventDefault();
-        if (tab) run(tab.id, tab.sql);
+        runNow();
       } else if (e.key.toLowerCase() === "n") {
         e.preventDefault();
         addTab();
@@ -1018,7 +1031,7 @@ export default function App() {
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [tab, run, addTab]);
+  }, [runNow, addTab]);
 
   const startDrag = (e: React.MouseEvent) => {
     const y0 = e.clientY;
@@ -1275,10 +1288,12 @@ export default function App() {
         <div className="toolbar">
           <button
             className="btn primary sm"
-            onClick={() => tab && run(tab.id, tab.sql)}
+            onClick={runNow}
             disabled={!connected || tab?.running}
+            title={hasSel ? "รันเฉพาะที่ลากคลุมไว้" : "รันเฉพาะคำสั่งที่เคอร์เซอร์อยู่ (คั่นด้วย ;)"}
           >
-            <Play size={14} weight="fill" /> Run <span style={{ opacity: 0.55 }}>Ctrl+↵</span>
+            <Play size={14} weight="fill" /> {hasSel ? "Run selection" : "Run"}{" "}
+            <span style={{ opacity: 0.55 }}>Ctrl+↵</span>
           </button>
           <button
             className="btn sm"
@@ -1328,11 +1343,15 @@ export default function App() {
 
         <div className="editor" style={{ height: editorH }}>
           <CodeMirror
+            ref={cmRef}
             value={tab?.sql ?? ""}
             height={`${editorH}px`}
             theme={blackTheme}
             extensions={cmExt}
             onChange={(v) => tab && patch(tab.id, { sql: v })}
+            onUpdate={(u) => {
+              if (u.selectionSet || u.docChanged) setHasSel(!u.state.selection.main.empty);
+            }}
             basicSetup={{
               foldGutter: false,
               highlightActiveLineGutter: false,

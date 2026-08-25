@@ -366,6 +366,15 @@ select:focus {
 .editor .cm-scroller {
   font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
   font-size: 13px;
+  /* base theme ของ CodeMirror ตั้งแค่ overflow-x — พอความสูงถูกล็อก แนวตั้งเลยโดนตัดทิ้ง */
+  overflow: auto;
+}
+
+/* ที่ลากคลุมต้องเห็นชัดบนพื้นดำ ทั้งตอนโฟกัสและตอนไปคลิกที่อื่น */
+.editor .cm-selectionBackground,
+.editor .cm-editor.cm-focused .cm-selectionBackground,
+.editor .cm-content ::selection {
+  background: #2f5d9e !important;
 }
 
 .dragbar {
