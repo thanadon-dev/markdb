@@ -359,6 +359,9 @@ select:focus {
   flex: none;
 }
 
+/* @uiw/react-codemirror แทรก div.cm-theme คั่นไว้ ถ้าไม่ล็อกความสูงชั้นนี้ด้วย
+   height:100% ของ .cm-editor จะไปเทียบกับ parent ที่สูง auto แล้วบานทะลุกรอบ */
+.editor .cm-theme,
 .editor .cm-editor {
   height: 100%;
 }

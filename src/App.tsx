@@ -96,6 +96,7 @@ type Conn = {
 };
 
 const CONNS_KEY = "markdb.conns";
+const TABS_KEY = "markdb.tabs";
 const ROW_H = 28;
 const BLANK: Conn = {
   id: "",
@@ -145,6 +146,21 @@ const newTab = (conn: string, over: Partial<Tab> = {}): Tab => ({
   sql: "",
   ...over,
 });
+
+/* แท็บที่เปิดค้างไว้ตอนปิดโปรแกรม — เก็บแค่ตัว query ไม่เก็บผลลัพธ์ */
+const loadTabs = () => {
+  try {
+    const s = JSON.parse(localStorage.getItem(TABS_KEY) || "null");
+    if (s?.tabs?.length)
+      return { tabs: s.tabs.map((t: Tab) => newTab(t.conn ?? "", t)) as Tab[], active: s.active as string };
+  } catch {
+    /* localStorage เสีย — เริ่มแท็บใหม่ */
+  }
+  const t = newTab("");
+  return { tabs: [t], active: t.id };
+};
+
+const BOOT = loadTabs();
 
 /* ดึงตารางจาก `from <schema>.<table>` ในตัว query — ใช้บอก CodeMirror ว่าคอลัมน์
    ของตารางไหนควรขึ้นเวลาพิมพ์ใน where/select โดยไม่ต้องพิมพ์ชื่อตารางนำ */
@@ -563,8 +579,8 @@ export default function App() {
   const [live, setLive] = useState<Record<string, Meta>>({});
   const [filter, setFilter] = useState("");
   const [picked, setPicked] = useState<TableInfo | null>(null);
-  const [tabs, setTabs] = useState<Tab[]>([newTab("")]);
-  const [activeTab, setActiveTab] = useState<string>("");
+  const [tabs, setTabs] = useState<Tab[]>(BOOT.tabs);
+  const [activeTab, setActiveTab] = useState<string>(BOOT.active);
   const [editorH, setEditorH] = useState(230);
   const [hasSel, setHasSel] = useState(false);
   const cmRef = useRef<ReactCodeMirrorRef>(null);
@@ -632,6 +648,18 @@ export default function App() {
     getVersion().then(setVersion).catch(() => {});
   }, []);
   useEffect(() => localStorage.setItem(CONNS_KEY, JSON.stringify(conns)), [conns]);
+
+  useEffect(() => {
+    const slim = tabs.map((t) => ({
+      id: t.id,
+      conn: t.conn,
+      title: t.title,
+      sql: t.sql,
+      source: t.source,
+      pk: t.pk,
+    }));
+    localStorage.setItem(TABS_KEY, JSON.stringify({ tabs: slim, active: activeTab }));
+  }, [tabs, activeTab]);
   // แก้ค่าในฟอร์มเมื่อไร ผลทดสอบเดิมถือว่าใช้ไม่ได้แล้ว
   useEffect(() => setTest(null), [form?.host, form?.port, form?.user, form?.pass, form?.db, form?.ssl, form?.url]);
 
@@ -830,6 +858,12 @@ export default function App() {
     });
   }, []);
 
+  const closeAll = useCallback(() => {
+    const nt = newTab(activeConn);
+    setTabs([nt]);
+    setActiveTab(nt.id);
+  }, [activeConn]);
+
   const exportAs = useCallback(
     async (kind: "csv" | "sql") => {
       if (!tab?.res?.rows.length) return say("ไม่มีผลลัพธ์ให้ export");
@@ -1014,9 +1048,14 @@ export default function App() {
     run(tab.id, sel || stmtAt(st.doc.toString(), head));
   }, [tab, run]);
 
+  const runRef = useRef(runNow);
+  runRef.current = runNow;
+
   /* keyboard: Ctrl+Enter รัน, Ctrl+N แท็บใหม่ */
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
+      // CodeMirror จัดการไปแล้ว (โฟกัสอยู่ในตัวแก้ไข) — ไม่ต้องรันซ้ำ
+      if (e.defaultPrevented) return;
       if (!(e.ctrlKey || e.metaKey)) return;
       // Ctrl+S ถูกจัดการที่ input ของ cell แล้ว — กันไม่ให้ webview เด้ง save page
       if (e.key.toLowerCase() === "s") {
@@ -1089,6 +1128,18 @@ export default function App() {
       support,
       support.language.data.of({ autocomplete: values }),
       autocompletion({ defaultKeymap: false }),
+      // ต้องแย่ง Ctrl+Enter จาก keymap ของ CodeMirror ไม่งั้นมันแทรกบรรทัดใหม่ก่อนแล้วค่อยรัน
+      Prec.highest(
+        keymap.of([
+          {
+            key: "Mod-Enter",
+            run: () => {
+              runRef.current();
+              return true;
+            },
+          },
+        ]),
+      ),
       completionKeys,
     ];
   }, [schema, ctx.schema, ctx.table, tabConn]);
@@ -1282,6 +1333,14 @@ export default function App() {
           ))}
           <button className="btn primary sm newq" onClick={addTab} title="New Query (Ctrl+N)">
             <Plus size={15} weight="bold" /> New Query
+          </button>
+          <button
+            className="btn sm"
+            onClick={closeAll}
+            disabled={tabs.length === 1 && !tabs[0].sql}
+            title="ปิดแท็บ query ทั้งหมด"
+          >
+            <X size={14} weight="bold" /> Close all
           </button>
         </div>
 
