@@ -1,6 +1,6 @@
 # MarkDB
 
-Postgres client ที่เบาและเร็ว — Tauri v2 + Rust + React
+Postgres / Amazon Redshift client ที่เบาและเร็ว — Tauri v2 + Rust + React
 
 ไบนารี ~8.7 MB, กินแรม ~25 MB (pgAdmin ~400 MB, DBeaver ~700 MB)
 
@@ -18,7 +18,7 @@ Postgres client ที่เบาและเร็ว — Tauri v2 + Rust + Re
 ## Requirements
 
 - Windows x64 (WebView2 — Win11/Win10 ที่อัปเดตแล้วมีมาให้)
-- Postgres 12+
+- Postgres 12+ หรือ Amazon Redshift
 
 ## Development
 
@@ -71,7 +71,7 @@ GitHub Actions จะ build, เซ็น, สร้าง Release พร้อ�
 
 | ไฟล์ | หน้าที่ |
 |---|---|
-| `src-tauri/src/lib.rs` | คำสั่งทั้งหมดที่คุยกับ Postgres (sqlx) |
+| `src-tauri/src/lib.rs` | คำสั่งทั้งหมดที่คุยกับ Postgres/Redshift (sqlx) |
 | `src/App.tsx` | UI ทั้งหมด |
 | `src/styles.css` | ธีม |
 | `logo-source.png` | ต้นฉบับ icon (`npm run tauri icon logo-source.png`) |
@@ -80,5 +80,6 @@ GitHub Actions จะ build, เซ็น, สร้าง Release พร้อ�
 
 - password ของ connection เก็บใน `localStorage` เป็น plaintext — ยังไม่เหมาะกับ DB production ที่แชร์กันหลายคน
 - backup ไม่ครอบคลุม trigger, function, extension, GRANT, partition
-- รองรับเฉพาะ Postgres และเฉพาะ x64
+- รองรับเฉพาะ Postgres กับ Redshift และเฉพาะ x64
+- บน Redshift: backup ทั้ง database ยังไม่รองรับ และ import CSV ใช้ INSERT ทีละก้อนแทน COPY
 - ยังไม่ได้ code sign — SmartScreen จะเตือนตอนเปิดครั้งแรก

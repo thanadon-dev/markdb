@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { stmtAt } from "./sqlsplit.ts";
+import { stmtAt, targetTable } from "./sqlsplit.ts";
 
 const at = (doc: string, marker: string) => stmtAt(doc, doc.indexOf(marker)).trim();
 
@@ -31,4 +31,30 @@ test("; ใน comment ไม่นับ", () => {
 
 test("ไม่มี ; เลย = ทั้งก้อน", () => {
   assert.equal(at("select * from t", "from"), "select * from t");
+});
+
+const tt = (sql: string) => {
+  const t = targetTable(sql);
+  return t ? (t.schema ? `${t.schema}.${t.name}` : t.name) : null;
+};
+
+test("หาตารางที่เขียนกลับได้จาก select ธรรมดา", () => {
+  assert.equal(tt("select * from users"), "users");
+  assert.equal(tt("select * from users;"), "users");
+  assert.equal(tt('select *\nfrom "public"."users"\nlimit 500;'), "public.users");
+  assert.equal(tt("select id, name from sales.orders where id = 3 order by id"), "sales.orders");
+  assert.equal(tt("SELECT * FROM Users u WHERE u.id = 1"), "Users");
+  assert.equal(tt("select * from users limit 10"), "users");
+  assert.equal(tt("select * from users -- from orders\n"), "users");
+});
+
+test("ปิดการแก้ค่าเมื่อไม่รู้ว่าแถวมาจากตารางไหน", () => {
+  assert.equal(tt("select * from a join b on a.id = b.a_id"), null);
+  assert.equal(tt("select * from a, b"), null);
+  assert.equal(tt("select * from (select 1) x"), null);
+  assert.equal(tt("select * from a union select * from b"), null);
+  assert.equal(tt("insert into users values (1)"), null);
+  assert.equal(tt("update users set a = 1"), null);
+  assert.equal(tt("select 1"), null);
+  assert.equal(tt(""), null);
 });
