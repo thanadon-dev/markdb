@@ -5,7 +5,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
-import { stmtAt } from "./sqlsplit";
+import { stmtAt, targetTable } from "./sqlsplit";
 import { PostgreSQL, sql as sqlLang } from "@codemirror/lang-sql";
 import { createTheme } from "@uiw/codemirror-themes";
 import { tags as t } from "@lezer/highlight";
@@ -59,7 +59,6 @@ type Tab = {
   title: string;
   sql: string;
   source?: string;
-  pk?: string[];
   res?: QueryResult;
   err?: string;
   running?: boolean;
@@ -83,9 +82,13 @@ type Release = { tag_name: string; name: string; published_at: string; body: str
 
 const RELEASES_API = "https://api.github.com/repos/thanadon-dev/markdb/releases?per_page=20";
 
+type Engine = "postgres" | "redshift";
+type ConnInfo = { version: string; engine: Engine };
+
 type Conn = {
   id: string;
   name: string;
+  engine: Engine;
   host: string;
   port: string;
   user: string;
@@ -98,9 +101,12 @@ type Conn = {
 const CONNS_KEY = "markdb.conns";
 const TABS_KEY = "markdb.tabs";
 const ROW_H = 28;
+const PORTS: Record<Engine, string> = { postgres: "5432", redshift: "5439" };
+
 const BLANK: Conn = {
   id: "",
   name: "",
+  engine: "postgres",
   host: "localhost",
   port: "5432",
   user: "postgres",
@@ -108,6 +114,42 @@ const BLANK: Conn = {
   db: "postgres",
   ssl: false,
 };
+
+/* โลโก้สองตัวนี้วาดเอง ไม่ได้ก๊อป asset ของแบรนด์มา — ใช้แค่รูปทรงกับสีที่จำได้
+   Postgres = หัวช้าง, Redshift = ลูกบาศก์ไล่สีแดง→ม่วง ("red shift" ตรงตัว) */
+const PgLogo = ({ size = 16 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden>
+    <path
+      d="M12 2.6c4.5 0 7.4 2.4 7.4 6.2 0 2.1-.5 3.6-1.4 5.4-.8 1.6-1.2 2.7-1.2 4.1 0 1.5-1 2.5-2.4 2.5-1.2 0-2-.7-2.4-2-.4 1.3-1.2 2-2.4 2-1.4 0-2.4-1-2.4-2.5 0-1.4-.4-2.5-1.2-4.1-.9-1.8-1.4-3.3-1.4-5.4 0-3.8 3.1-6.2 7.4-6.2Z"
+      fill="#336791"
+    />
+    <circle cx="9.1" cy="9.1" r="1.05" fill="#eaf3fb" />
+    <path
+      d="M14.5 12.3c1 .6 1.5 1.7 1.2 2.9"
+      stroke="#9dc6ea"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      fill="none"
+    />
+  </svg>
+);
+
+const RsLogo = ({ size = 16 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden>
+    <defs>
+      <linearGradient id="mdb-rs" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stopColor="#ff4d6d" />
+        <stop offset="100%" stopColor="#8c4fff" />
+      </linearGradient>
+    </defs>
+    <path d="M12 2.2 20.6 7v10L12 21.8 3.4 17V7Z" fill="url(#mdb-rs)" />
+    <path d="M12 2.2 20.6 7 12 11.8 3.4 7Z" fill="#fff" opacity=".26" />
+    <path d="M12 11.8v10L3.4 17V7Z" fill="#000" opacity=".22" />
+  </svg>
+);
+
+const EngineLogo = ({ engine, size }: { engine: Engine; size?: number }) =>
+  engine === "redshift" ? <RsLogo size={size} /> : <PgLogo size={size} />;
 
 const mb = (n: number) => (n / 1_048_576).toFixed(1);
 
@@ -121,8 +163,11 @@ const connUrl = (c: Conn) => {
     : c.user
       ? `${encodeURIComponent(c.user)}@`
       : "";
-  return `postgres://${auth}${c.host}:${c.port || 5432}/${encodeURIComponent(c.db)}${
-    c.ssl ? "?sslmode=require" : ""
+  const port = c.port || PORTS[c.engine ?? "postgres"];
+  // Redshift ปิดการต่อแบบไม่เข้ารหัสไว้ที่ cluster อยู่แล้ว — บังคับ sslmode ให้เลย
+  const ssl = c.ssl || c.engine === "redshift";
+  return `postgres://${auth}${c.host}:${port}/${encodeURIComponent(c.db)}${
+    ssl ? "?sslmode=require" : ""
   }`;
 };
 
@@ -131,6 +176,7 @@ const loadConns = (): Conn[] => {
     return JSON.parse(localStorage.getItem(CONNS_KEY) || "[]").map((c: Conn) => ({
       ...BLANK,
       ...c,
+      engine: c.engine ?? "postgres",
     }));
   } catch {
     return [];
@@ -413,9 +459,11 @@ const Grid = memo(function Grid({
   onSelect: (rowIndex: number) => void;
 }) {
   const parent = useRef<HTMLDivElement>(null);
-  const [picked, setPicked] = useState("");
+  // cur ชี้ด้วย "ลำดับที่เห็นบนจอ" (index ใน order) ไม่ใช่ index จริงของแถว
+  // การกดลูกศรจึงเดินตามที่ตาเห็นแม้กำลังกรองหรือเรียงอยู่
+  const [cur, setCur] = useState<{ r: number; c: number } | null>(null);
   const [selRow, setSelRow] = useState(-1);
-  const [editing, setEditing] = useState("");
+  const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [sort, setSort] = useState<{ col: string; dir: "asc" | "desc" } | null>(null);
 
@@ -453,6 +501,13 @@ const Grid = memo(function Grid({
     });
   }, [res, sort, filter]);
 
+  // ผูกกับ columns ไม่ใช่ res ทั้งก้อน — แก้ค่าทีนึง res เปลี่ยน object ใหม่ทุกครั้ง
+  // ถ้า reset ตามนั้นเคอร์เซอร์จะเด้งหายทุกครั้งที่กด Enter บันทึก
+  useEffect(() => {
+    setCur(null);
+    setEditing(false);
+  }, [res.columns]);
+
   const rv = useVirtualizer({
     count: order.length,
     getScrollElement: () => parent.current,
@@ -465,10 +520,68 @@ const Grid = memo(function Grid({
       s?.col !== c ? { col: c, dir: "asc" } : s.dir === "asc" ? { col: c, dir: "desc" } : null,
     );
 
-  const commit = (index: number, col: string, original: unknown) => {
-    setEditing("");
-    if (draft === cellText(original)) return;
-    onEdit(index, col, draft.toUpperCase() === "NULL" ? null : draft);
+  const moveTo = (r: number, c: number) => {
+    if (!order.length) return;
+    const rr = Math.max(0, Math.min(order.length - 1, r));
+    const cc = Math.max(0, Math.min(res.columns.length - 1, c));
+    setCur({ r: rr, c: cc });
+    setSelRow(order[rr]);
+    onSelect(order[rr]);
+    rv.scrollToIndex(rr);
+  };
+
+  const startEdit = (r: number, c: number, initial?: string) => {
+    if (!editable) return;
+    const v = res.rows[order[r]][res.columns[c]];
+    setCur({ r, c });
+    setDraft(initial ?? (v === null || v === undefined ? "" : cellText(v)));
+    setEditing(true);
+  };
+
+  /* บันทึกแล้วไปต่อ: 1 = ลงแถวล่าง (Enter), 2 = ไปคอลัมน์ขวา (Tab) */
+  const commit = (move: 1 | 2) => {
+    if (!cur) return;
+    const ri = order[cur.r];
+    const col = res.columns[cur.c];
+    setEditing(false);
+    parent.current?.focus();
+    if (draft !== cellText(res.rows[ri][col]))
+      onEdit(ri, col, draft.toUpperCase() === "NULL" ? null : draft);
+    moveTo(move === 1 ? cur.r + 1 : cur.r, move === 2 ? cur.c + 1 : cur.c);
+  };
+
+  const onKey = (e: React.KeyboardEvent) => {
+    if (editing) return;
+    if (!cur) {
+      if (e.key.startsWith("Arrow")) {
+        e.preventDefault();
+        moveTo(0, 0);
+      }
+      return;
+    }
+    const k = e.key;
+    const jump = { ArrowDown: [1, 0], ArrowUp: [-1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[k];
+    if (jump) {
+      e.preventDefault();
+      moveTo(cur.r + jump[0], cur.c + jump[1]);
+    } else if (k === "Tab") {
+      e.preventDefault();
+      moveTo(cur.r, cur.c + (e.shiftKey ? -1 : 1));
+    } else if (k === "PageDown" || k === "PageUp") {
+      e.preventDefault();
+      moveTo(cur.r + (k === "PageDown" ? 20 : -20), cur.c);
+    } else if (k === "Enter" || k === "F2") {
+      e.preventDefault();
+      startEdit(cur.r, cur.c);
+    } else if (k === "Escape") {
+      setCur(null);
+    } else if ((e.ctrlKey || e.metaKey) && k.toLowerCase() === "c") {
+      onCopy(cellText(res.rows[order[cur.r]][res.columns[cur.c]]));
+    } else if (k.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      // พิมพ์ตัวอักษรทับได้เลยแบบสเปรดชีต ไม่ต้องดับเบิลคลิกก่อน
+      e.preventDefault();
+      startEdit(cur.r, cur.c, k);
+    }
   };
 
   if (!res.columns.length)
@@ -482,7 +595,7 @@ const Grid = memo(function Grid({
     );
 
   return (
-    <div className="result" ref={parent}>
+    <div className="result grid" ref={parent} tabIndex={0} onKeyDown={onKey}>
       <div className="grid-head" style={{ gridTemplateColumns: template }}>
         {res.columns.map((c) => (
           <div
@@ -515,25 +628,31 @@ const Grid = memo(function Grid({
                 onSelect(ri);
               }}
             >
-              {res.columns.map((c) => {
-                const id = `${ri}:${c}`;
-                if (editing === id)
+              {res.columns.map((c, ci) => {
+                const here = cur?.r === vi.index && cur.c === ci;
+                if (here && editing)
                   return (
                     <div key={c} className="cell editing">
                       <input
                         autoFocus
                         value={draft}
                         onChange={(e) => setDraft(e.target.value)}
-                        onBlur={() => setEditing("")}
+                        onBlur={() => setEditing(false)}
                         onKeyDown={(e) => {
                           const save =
                             e.key === "Enter" ||
                             ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s");
                           if (save) {
                             e.preventDefault();
-                            commit(ri, c, row[c]);
+                            commit(1);
+                          } else if (e.key === "Tab") {
+                            e.preventDefault();
+                            commit(2);
+                          } else if (e.key === "Escape") {
+                            e.preventDefault();
+                            setEditing(false);
+                            parent.current?.focus();
                           }
-                          if (e.key === "Escape") setEditing("");
                         }}
                       />
                     </div>
@@ -541,23 +660,18 @@ const Grid = memo(function Grid({
                 return (
                   <div
                     key={c}
-                    className={cellClass(row[c]) + (picked === id ? " picked" : "")}
+                    className={cellClass(row[c]) + (here ? " picked" : "")}
                     title={
                       editable
                         ? `${cellText(row[c])}
 
-ดับเบิลคลิกเพื่อแก้ (พิมพ์ NULL = ค่าว่าง)`
+พิมพ์ทับได้เลย หรือกด Enter/F2 เพื่อแก้ (พิมพ์ NULL = ค่าว่าง)`
                         : cellText(row[c])
                     }
-                    onDoubleClick={() => {
-                      setPicked(id);
-                      if (editable) {
-                        setDraft(row[c] === null || row[c] === undefined ? "" : cellText(row[c]));
-                        setEditing(id);
-                      } else {
-                        onCopy(cellText(row[c]));
-                      }
-                    }}
+                    onMouseDown={() => moveTo(vi.index, ci)}
+                    onDoubleClick={() =>
+                      editable ? startEdit(vi.index, ci) : onCopy(cellText(row[c]))
+                    }
                   >
                     {cellText(row[c])}
                   </div>
@@ -583,6 +697,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<string>(BOOT.active);
   const [editorH, setEditorH] = useState(230);
   const [hasSel, setHasSel] = useState(false);
+  // key ที่ใช้ชี้แถวเดียว ต่อ connection+ตาราง — ถามครั้งเดียวแล้วจำไว้
+  const [keys, setKeys] = useState<Record<string, string[] | null>>({});
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const [toast, setToast] = useState("");
   const [form, setForm] = useState<Conn | null>(null);
@@ -615,28 +731,46 @@ export default function App() {
   const tables = live[activeConn]?.tables ?? [];
   const schema = live[tabConn]?.schema ?? {};
 
-  /* แก้ค่าได้เฉพาะตอนที่ผลลัพธ์ยังมาจากตารางเดิม + มี pk ครบในผลลัพธ์
-     (กันเคสแก้ query ไปชี้ตารางอื่นแล้ว UPDATE ลงผิดที่) */
-  const editable = !!(
-    tab?.source &&
-    tab.pk?.length &&
-    tab.res &&
-    tab.sql.includes(tab.source) &&
-    tab.pk.every((k) => tab.res!.columns.includes(k))
-  );
+  /* ตารางเป้าหมายอ่านจากตัว query เอง ไม่ผูกกับว่าเปิดแท็บมาแบบไหน — พิมพ์
+     select เองในแท็บใหม่ก็แก้ค่าได้ และพอแก้ query ไปชี้ตารางอื่นมันก็ตามไปเอง */
+  const target = useMemo(() => {
+    const t = targetTable(tab?.sql ?? "");
+    if (!t) return "";
+    if (t.schema) return `"${t.schema}"."${t.name}"`;
+    // ไม่ได้ระบุ schema — หาจากรายชื่อตารางจริงก่อน ค่อย fallback เป็น public
+    const hit = (live[tabConn]?.tables ?? []).filter((x) => x.name === t.name);
+    return hit.length === 1 ? `"${hit[0].schema}"."${t.name}"` : `"public"."${t.name}"`;
+  }, [tab?.sql, live, tabConn]);
 
-  const editReason =
-    editable || !tab?.source || !tab.res
-      ? ""
-      : tab.pk === undefined
-        ? "กำลังตรวจ primary key…"
-        : !tab.pk.length
-          ? "ตารางนี้ไม่มี primary key — แก้ค่าตรง ๆ ไม่ได้"
-          : !tab.sql.includes(tab.source)
-            ? "query ไม่ตรงกับตารางต้นทางแล้ว — ปิดการแก้ค่าไว้"
-            : "ผลลัพธ์ไม่มีคอลัมน์ primary key ครบ — แก้ค่าไม่ได้";
+  const keyId = target ? `${tabConn}::${target}` : "";
+  const rowKey = keyId ? keys[keyId] : null;
 
-  const canAddRow = !!(tab?.source && tab.sql.includes(tab.source));
+  useEffect(() => {
+    if (!keyId || !live[tabConn] || keys[keyId] !== undefined) return;
+    let alive = true;
+    invoke<string[]>("list_pk", { conn: tabConn, table: target })
+      .then((k) => alive && setKeys((m) => ({ ...m, [keyId]: k })))
+      .catch(() => alive && setKeys((m) => ({ ...m, [keyId]: [] })));
+    return () => {
+      alive = false;
+    };
+  }, [keyId, target, tabConn, live, keys]);
+
+  const missingKeys = (rowKey ?? []).filter((k) => !tab?.res?.columns.includes(k));
+
+  const editable = !!(tab?.res?.columns.length && rowKey?.length && !missingKeys.length);
+
+  const editReason = !tab?.res?.columns.length
+    ? ""
+    : !target
+      ? "แก้ค่าได้เฉพาะ select จากตารางเดียว (มี join หรือ subquery จะปิดไว้)"
+      : rowKey === undefined
+        ? "กำลังตรวจ key ของตาราง…"
+        : !rowKey?.length
+          ? "ตารางนี้ไม่มี primary key หรือ unique index — แก้ค่าตรง ๆ ไม่ได้"
+          : `ใส่ ${missingKeys.join(", ")} ไว้ใน select ด้วยถึงจะแก้ค่าได้`;
+
+  const canAddRow = !!target;
 
   useEffect(() => {
     setSelRow(-1);
@@ -656,7 +790,6 @@ export default function App() {
       title: t.title,
       sql: t.sql,
       source: t.source,
-      pk: t.pk,
     }));
     localStorage.setItem(TABS_KEY, JSON.stringify({ tabs: slim, active: activeTab }));
   }, [tabs, activeTab]);
@@ -699,10 +832,16 @@ export default function App() {
     async (c: Conn) => {
       setBusy(true);
       try {
-        await invoke<string>("connect", { conn: c.id, url: connUrl(c) });
+        const info = await invoke<ConnInfo>("connect", { conn: c.id, url: connUrl(c) });
         setActiveConn(c.id);
         await loadMeta(c.id);
-        say(`เชื่อมต่อ ${c.name} แล้ว`);
+        // เลือกผิดก็ยังใช้ได้ — จำค่าที่ตรวจได้จริงไว้แทน
+        if (info.engine !== c.engine) {
+          setConns((cs) => cs.map((x) => (x.id === c.id ? { ...x, engine: info.engine } : x)));
+          say(`เชื่อมต่อ ${c.name} แล้ว — ตรวจพบว่าเป็น ${info.engine}`);
+        } else {
+          say(`เชื่อมต่อ ${c.name} แล้ว`);
+        }
       } catch (e) {
         say(String(e));
       } finally {
@@ -746,11 +885,8 @@ export default function App() {
       setTabs((ts) => [...ts, nt]);
       setActiveTab(nt.id);
       run(nt.id, q, activeConn);
-      invoke<string[]>("list_pk", { conn: activeConn, table: src })
-        .then((pk) => patch(nt.id, { pk }))
-        .catch(() => patch(nt.id, { pk: [] }));
     },
-    [run, patch, activeConn],
+    [run, activeConn],
   );
 
   const showProps = useCallback(
@@ -766,30 +902,30 @@ export default function App() {
 
   /* เปิดฟอร์มเพิ่มแถว — ดึง type/default ของคอลัมน์มาโชว์เป็นคำใบ้ */
   const openAddRow = useCallback(async () => {
-    if (!tab?.source) return;
+    if (!tab || !target) return;
     try {
-      const props = await invoke<TableProps>("table_props", { conn: tab.conn, table: tab.source });
+      const props = await invoke<TableProps>("table_props", { conn: tab.conn, table: target });
       setAddRow({ cols: props.columns, vals: {} });
     } catch (e) {
       say(String(e));
     }
-  }, [tab, say]);
+  }, [tab, target, say]);
 
   const saveNewRow = useCallback(async () => {
-    if (!addRow || !tab?.source) return;
+    if (!addRow || !tab || !target) return;
     // ส่งเฉพาะช่องที่กรอกจริง — ที่เหลือปล่อยให้ DEFAULT ของตารางทำงาน
     const values = Object.entries(addRow.vals)
       .filter(([, v]) => v !== "")
       .map(([column, v]) => ({ column, value: v.toUpperCase() === "NULL" ? null : v }));
     try {
-      await invoke("insert_row", { conn: tab.conn, table: tab.source, values });
+      await invoke("insert_row", { conn: tab.conn, table: target, values });
       setAddRow(null);
       say("เพิ่มแถวแล้ว");
       run(tab.id, tab.sql);
     } catch (e) {
       say(String(e));
     }
-  }, [addRow, tab, run, say]);
+  }, [addRow, tab, target, run, say]);
 
   const openEr = useCallback(async () => {
     setErOpen(true);
@@ -804,34 +940,34 @@ export default function App() {
 
   const pkKeys = useCallback(
     (row: Record<string, unknown>) =>
-      (tab?.pk ?? []).map((k) => ({
+      (rowKey ?? []).map((k) => ({
         column: k,
         value: row[k] === null || row[k] === undefined ? null : cellText(row[k]),
       })),
-    [tab],
+    [rowKey],
   );
 
   const doDelete = useCallback(async () => {
-    if (!confirmDel || !tab?.source) return;
+    if (!confirmDel || !tab || !target) return;
     const keys = pkKeys(confirmDel);
     setConfirmDel(null);
     try {
-      await invoke("delete_row", { conn: tab.conn, table: tab.source, keys });
+      await invoke("delete_row", { conn: tab.conn, table: target, keys });
       say("ลบแถวแล้ว");
       setSelRow(-1);
       run(tab.id, tab.sql);
     } catch (e) {
       say(String(e));
     }
-  }, [confirmDel, tab, pkKeys, run, say]);
+  }, [confirmDel, tab, target, pkKeys, run, say]);
 
   const editCell = useCallback(
     async (rowIndex: number, column: string, value: string | null) => {
-      if (!tab?.res || !tab.source || !tab.pk) return;
+      if (!tab?.res || !target || !rowKey?.length) return;
       const row = tab.res.rows[rowIndex];
       const keys = pkKeys(row);
       try {
-        await invoke("update_cell", { conn: tab.conn, table: tab.source, column, value, keys });
+        await invoke("update_cell", { conn: tab.conn, table: target, column, value, keys });
         const rows = tab.res.rows.slice();
         rows[rowIndex] = { ...row, [column]: value };
         patch(tab.id, { res: { ...tab.res, rows } });
@@ -840,7 +976,7 @@ export default function App() {
         say(String(e));
       }
     },
-    [tab, patch, pkKeys, say],
+    [tab, target, rowKey, patch, pkKeys, say],
   );
 
   const addTab = useCallback(() => {
@@ -962,8 +1098,8 @@ export default function App() {
     setTesting(true);
     setTest(null);
     try {
-      const ver = await invoke<string>("test_connection", { url: connUrl(c) });
-      setTest({ ok: true, msg: ver.split(" on ")[0] });
+      const info = await invoke<ConnInfo>("test_connection", { url: connUrl(c) });
+      setTest({ ok: true, msg: `${info.engine} · ${info.version.split(" on ")[0]}` });
     } catch (e) {
       setTest({ ok: false, msg: String(e) });
     } finally {
@@ -1172,7 +1308,7 @@ export default function App() {
               title={connUrl(c)}
               onClick={() => (live[c.id] ? setActiveConn(c.id) : doConnect(c))}
             >
-              <Database size={15} weight="duotone" />
+              <EngineLogo engine={c.engine ?? "postgres"} size={15} />
               <span>{c.name}</span>
               <span className={"cdot" + (live[c.id] ? " on" : "")} />
               {live[c.id] && (
@@ -1358,7 +1494,7 @@ export default function App() {
             className="btn sm"
             onClick={openAddRow}
             disabled={!canAddRow}
-            title={canAddRow ? "เพิ่มแถวใหม่ในตารางนี้" : "เปิดตารางจากแถบซ้ายก่อนถึงจะเพิ่มแถวได้"}
+            title={canAddRow ? `เพิ่มแถวใน ${target}` : "ต้องเป็น select จากตารางเดียวถึงจะเพิ่มแถวได้"}
           >
             <RowsPlusBottom size={15} weight="duotone" /> Add row
           </button>
@@ -1368,7 +1504,7 @@ export default function App() {
             disabled={!editable || selRow < 0}
             title={
               !editable
-                ? "ลบได้เฉพาะตารางที่เปิดจากแถบซ้ายและมี primary key"
+                ? editReason || "ลบแถวตรง ๆ ไม่ได้กับผลลัพธ์นี้"
                 : selRow < 0
                   ? "คลิกเลือกแถวก่อน"
                   : "ลบแถวที่เลือก"
@@ -1392,8 +1528,8 @@ export default function App() {
           <div className="spacer" />
           {editable ? (
             <span style={{ color: "var(--dim)", fontSize: 12 }}>
-              <PencilSimple size={12} style={{ verticalAlign: -1 }} /> ดับเบิลคลิก cell เพื่อแก้ ·
-              Ctrl+S หรือ Enter บันทึก
+              <PencilSimple size={12} style={{ verticalAlign: -1 }} /> คลิกเลือก cell · พิมพ์ได้เลย
+              หรือกด Enter/F2 · Enter บันทึกแล้วลงแถวถัดไป · Tab บันทึกแล้วไปขวา · Esc ยกเลิก
             </span>
           ) : (
             editReason && <span style={{ color: "var(--dim)", fontSize: 12 }}>{editReason}</span>
@@ -1428,7 +1564,7 @@ export default function App() {
         ) : tab?.res ? (
           <Grid
             res={tab.res}
-            pk={editable ? tab.pk! : []}
+            pk={rowKey ?? []}
             editable={editable}
             filter={gridFilter}
             onEdit={editCell}
@@ -1478,7 +1614,28 @@ export default function App() {
             <h3>
               <Plug size={17} weight="duotone" /> Connection
             </h3>
-            <p>กรอกทีละช่อง หรือวาง connection string ลงช่อง Host ก็ได้</p>
+            <p>เลือกชนิดฐานข้อมูล แล้วกรอกทีละช่อง หรือวาง connection string ลงช่อง Host</p>
+
+            <div className="engines">
+              {(["postgres", "redshift"] as Engine[]).map((e) => (
+                <button
+                  key={e}
+                  className={"engine" + (form.engine === e ? " on" : "")}
+                  onClick={() =>
+                    setForm({
+                      ...form,
+                      engine: e,
+                      // พอร์ตยังเป็นค่าเริ่มต้นของอีกฝั่งอยู่ค่อยเปลี่ยนให้ ไม่ทับที่พิมพ์เอง
+                      port: form.port === PORTS[form.engine] || !form.port ? PORTS[e] : form.port,
+                    })
+                  }
+                >
+                  <EngineLogo engine={e} size={26} />
+                  <b>{e === "redshift" ? "Amazon Redshift" : "PostgreSQL"}</b>
+                  <em>พอร์ต {PORTS[e]}</em>
+                </button>
+              ))}
+            </div>
 
             <div className="field">
               <label>ชื่อเรียก</label>
@@ -1566,7 +1723,7 @@ export default function App() {
               <button
                 className="btn primary sm"
                 onClick={() => {
-                  const c = { ...form, name: form.name.trim() || form.db || "postgres" };
+                  const c = { ...form, name: form.name.trim() || form.db || form.engine };
                   setConns((cs) =>
                     cs.some((x) => x.id === c.id)
                       ? cs.map((x) => (x.id === c.id ? c : x))
@@ -1660,10 +1817,10 @@ export default function App() {
             <p>ลบแล้วกู้คืนไม่ได้</p>
             <div className="warn">
               <div>
-                จาก <b>{tab?.source}</b>
+                จาก <b>{target}</b>
               </div>
               <div className="path">
-                {(tab?.pk ?? [])
+                {(rowKey ?? [])
                   .map((k) => `${k} = ${cellText(confirmDel[k])}`)
                   .join("  ·  ")}
               </div>

@@ -469,9 +469,18 @@ select:focus {
   color: #cfcfcf;
 }
 
+/* cell ที่เคอร์เซอร์อยู่ — กรอบชัดพอให้รู้ว่าพิมพ์แล้วจะลงตรงไหน */
 .cell.picked {
-  background: #1c1c1c !important;
-  box-shadow: inset 0 0 0 1px #444;
+  background: #14243d !important;
+  box-shadow: inset 0 0 0 2px #4a8cff;
+}
+
+.result.grid {
+  outline: none;
+}
+
+.result.grid:focus-visible .cell.picked {
+  box-shadow: inset 0 0 0 2px #6ba4ff;
 }
 
 .cell input {
@@ -1260,4 +1269,48 @@ select:focus {
   font-size: 11px;
   color: var(--dim);
   pointer-events: none;
+}
+
+/* ตัวเลือกชนิดฐานข้อมูลในฟอร์ม connection */
+.engines {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 4px 0 14px;
+}
+
+.engine {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 14px 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--dim);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.engine:hover {
+  border-color: #3a3a3a;
+  background: var(--panel-2);
+}
+
+.engine.on {
+  border-color: #4a8cff;
+  background: #0e1726;
+  color: var(--text);
+}
+
+.engine b {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.engine em {
+  font-style: normal;
+  font-size: 10.5px;
+  opacity: 0.65;
 }

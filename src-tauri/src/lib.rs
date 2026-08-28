@@ -1,15 +1,38 @@
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgPool, PgPoolCopyExt, PgPoolOptions};
-use sqlx::{Column, Executor};
+use sqlx::{Column, Executor, Row, TypeInfo, ValueRef};
 use std::collections::HashMap;
 use std::time::Instant;
 use tokio::sync::Mutex;
 
 const MAX_ROWS: usize = 5000;
 
+/// Redshift พูด wire protocol เดียวกับ Postgres แต่ไม่มี pg_catalog หลายตัวและไม่มี
+/// json_agg — คำสั่งที่ต่างกันจึงแยกตาม engine ที่ตรวจได้ตอน connect
+#[derive(Clone, Copy, PartialEq)]
+enum Engine {
+    Postgres,
+    Redshift,
+}
+
+impl Engine {
+    fn name(self) -> &'static str {
+        match self {
+            Engine::Postgres => "postgres",
+            Engine::Redshift => "redshift",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Db {
+    pool: PgPool,
+    engine: Engine,
+}
+
 /// หลาย connection พร้อมกัน — key คือ id ของ connection ฝั่ง UI
 struct AppState {
-    pools: Mutex<HashMap<String, PgPool>>,
+    conns: Mutex<HashMap<String, Db>>,
 }
 
 #[derive(Serialize)]
@@ -34,9 +57,9 @@ fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
-async fn pool(state: &AppState, conn: &str) -> R<PgPool> {
+async fn db(state: &AppState, conn: &str) -> R<Db> {
     state
-        .pools
+        .conns
         .lock()
         .await
         .get(conn)
@@ -44,41 +67,83 @@ async fn pool(state: &AppState, conn: &str) -> R<PgPool> {
         .ok_or_else(|| "connection นี้ยังไม่ได้เชื่อมต่อ".to_string())
 }
 
+async fn pool(state: &AppState, conn: &str) -> R<PgPool> {
+    Ok(db(state, conn).await?.pool)
+}
+
+/// version() ของ Redshift ลงท้ายด้วย "Redshift 1.0.xxxxx" — เชื่อค่าจาก server
+/// มากกว่าที่ผู้ใช้เลือกในฟอร์ม เลือกผิดก็ยังใช้งานได้
+fn detect(version: &str) -> Engine {
+    if version.to_ascii_lowercase().contains("redshift") {
+        Engine::Redshift
+    } else {
+        Engine::Postgres
+    }
+}
+
+/// แยก `"schema"."table"` (หรือ `schema.table` / `table`) เป็นสองส่วน
+/// ใช้กับคำสั่งฝั่ง Redshift ที่ถาม information_schema ซึ่งไม่มี regclass ให้ cast
+// ponytail: ไม่รองรับจุดที่อยู่ในชื่อจริง เช่น "a.b" — เจอค่อยไป parse ให้ครบ
+fn split_name(q: &str) -> (String, String) {
+    let unq = |s: &str| s.trim().trim_matches('"').replace("\"\"", "\"");
+    if let Some((a, b)) = q.rsplit_once("\".\"") {
+        return (unq(a), unq(b));
+    }
+    match q.split_once('.') {
+        Some((a, b)) => (unq(a), unq(b)),
+        None => ("public".into(), unq(q)),
+    }
+}
+
+#[derive(Serialize)]
+struct ConnInfo {
+    version: String,
+    engine: &'static str,
+}
+
 #[tauri::command]
 async fn connect(url: String, conn: String,
-    state: tauri::State<'_, AppState>) -> R<String> {
+    state: tauri::State<'_, AppState>) -> R<ConnInfo> {
     let p = PgPoolOptions::new()
         .max_connections(4)
         .connect(&url)
         .await
         .map_err(err)?;
-    let ver: String = sqlx::query_scalar("select version()")
+    let version: String = sqlx::query_scalar("select version()")
         .fetch_one(&p)
         .await
         .map_err(err)?;
-    state.pools.lock().await.insert(conn, p);
-    Ok(ver)
+    let engine = detect(&version);
+    state.conns.lock().await.insert(conn, Db { pool: p, engine });
+    Ok(ConnInfo {
+        version,
+        engine: engine.name(),
+    })
 }
 
 /// ลองต่อด้วย connection เดี่ยว ๆ แล้วปิดทิ้ง — ไม่แตะ pool ที่ใช้งานอยู่
 /// กด test ระหว่างที่ยังต่อ DB อื่นค้างอยู่จึงไม่ทำให้หลุด
 #[tauri::command]
-async fn test_connection(url: String) -> R<String> {
+async fn test_connection(url: String) -> R<ConnInfo> {
     use sqlx::Connection;
     let mut c = sqlx::PgConnection::connect(&url).await.map_err(err)?;
-    let ver: String = sqlx::query_scalar("select version()")
+    let version: String = sqlx::query_scalar("select version()")
         .fetch_one(&mut c)
         .await
         .map_err(err)?;
     c.close().await.ok();
-    Ok(ver)
+    let engine = detect(&version);
+    Ok(ConnInfo {
+        version,
+        engine: engine.name(),
+    })
 }
 
 #[tauri::command]
 async fn disconnect(conn: String,
     state: tauri::State<'_, AppState>) -> R<()> {
-    if let Some(p) = state.pools.lock().await.remove(&conn) {
-        p.close().await;
+    if let Some(d) = state.conns.lock().await.remove(&conn) {
+        d.pool.close().await;
     }
     Ok(())
 }
@@ -125,18 +190,63 @@ async fn list_all_columns(conn: String,
     .map_err(err)
 }
 
-/// คอลัมน์ที่เป็น primary key ของตาราง — ว่าง = แก้ค่าในตารางไม่ได้
+/// คอลัมน์ที่ใช้ชี้แถวเดียวได้ — primary key ก่อน ไม่มีก็ใช้ unique index ที่ทุกคอลัมน์
+/// เป็น NOT NULL แทน (ตารางที่ลืมประกาศ pk จึงยังแก้ค่าในตารางได้)
+/// ว่าง = แก้ค่าตรง ๆ ไม่ได้
 #[tauri::command]
 async fn list_pk(table: String, conn: String,
     state: tauri::State<'_, AppState>) -> R<Vec<String>> {
-    let p = pool(&state, &conn).await?;
+    let d = db(&state, &conn).await?;
+    if d.engine == Engine::Redshift {
+        let (sch, tbl) = split_name(&table);
+        // Redshift ไม่บังคับ constraint แต่เก็บ metadata ไว้ให้ query ได้
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "select tc.constraint_name, kcu.column_name
+             from information_schema.table_constraints tc
+             join information_schema.key_column_usage kcu
+               on kcu.constraint_name = tc.constraint_name
+              and kcu.table_schema = tc.table_schema
+              and kcu.table_name = tc.table_name
+             where tc.table_schema = $1 and tc.table_name = $2
+               and tc.constraint_type in ('PRIMARY KEY', 'UNIQUE')
+             order by case tc.constraint_type when 'PRIMARY KEY' then 0 else 1 end,
+                      tc.constraint_name, kcu.ordinal_position",
+        )
+        .bind(&sch)
+        .bind(&tbl)
+        .fetch_all(&d.pool)
+        .await
+        .map_err(err)?;
+        // เอาเฉพาะ constraint ตัวแรก ไม่ปนคอลัมน์ข้าม constraint
+        let first = rows.first().map(|(n, _)| n.clone());
+        return Ok(rows
+            .into_iter()
+            .filter(|(n, _)| Some(n) == first.as_ref())
+            .map(|(_, c)| c)
+            .collect());
+    }
+
     let rows: Vec<(String,)> = sqlx::query_as(
-        "select a.attname from pg_index i
-         join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
-         where i.indrelid = $1::regclass and i.indisprimary",
+        "with pick as (
+           select i.indexrelid, i.indkey
+           from pg_index i
+           where i.indrelid = $1::regclass and i.indisunique and i.indpred is null
+             and not exists (select 1 from unnest(i.indkey) k where k = 0)
+             and not exists (
+               select 1 from unnest(i.indkey) k
+               join pg_attribute aa on aa.attrelid = i.indrelid and aa.attnum = k
+               where not aa.attnotnull)
+           order by i.indisprimary desc, array_length(i.indkey, 1), i.indexrelid
+           limit 1
+         )
+         select a.attname
+         from pick
+         cross join unnest(pick.indkey) with ordinality k(attnum, ord)
+         join pg_attribute a on a.attrelid = $1::regclass and a.attnum = k.attnum
+         order by k.ord",
     )
     .bind(&table)
-    .fetch_all(&p)
+    .fetch_all(&d.pool)
     .await
     .map_err(err)?;
     Ok(rows.into_iter().map(|(c,)| c).collect())
@@ -172,7 +282,11 @@ struct TableProps {
 #[tauri::command]
 async fn table_props(table: String, conn: String,
     state: tauri::State<'_, AppState>) -> R<TableProps> {
-    let p = pool(&state, &conn).await?;
+    let d = db(&state, &conn).await?;
+    if d.engine == Engine::Redshift {
+        return redshift_props(&d.pool, &table).await;
+    }
+    let p = d.pool;
     let cols: Vec<(String, String, bool, String, bool)> = sqlx::query_as(
         "select a.attname,
                 format_type(a.atttypid, a.atttypmod),
@@ -242,6 +356,106 @@ async fn table_props(table: String, conn: String,
     })
 }
 
+/// properties ฝั่ง Redshift — information_schema + svv_table_info แทน pg_catalog
+async fn redshift_props(p: &PgPool, table: &str) -> R<TableProps> {
+    let (sch, tbl) = split_name(table);
+    let cols: Vec<(String, String, bool, String)> = sqlx::query_as(
+        "select column_name,
+                case when character_maximum_length is not null
+                       then data_type || '(' || character_maximum_length::text || ')'
+                     when data_type in ('numeric', 'decimal') and numeric_precision is not null
+                       then data_type || '(' || numeric_precision::text || ',' ||
+                            coalesce(numeric_scale, 0)::text || ')'
+                     else data_type end,
+                is_nullable = 'YES',
+                coalesce(column_default, '')
+         from information_schema.columns
+         where table_schema = $1 and table_name = $2
+         order by ordinal_position",
+    )
+    .bind(&sch)
+    .bind(&tbl)
+    .fetch_all(p)
+    .await
+    .map_err(err)?;
+
+    let keys: Vec<(String,)> = sqlx::query_as(
+        "select kcu.column_name
+         from information_schema.table_constraints tc
+         join information_schema.key_column_usage kcu
+           on kcu.constraint_name = tc.constraint_name
+          and kcu.table_schema = tc.table_schema
+          and kcu.table_name = tc.table_name
+         where tc.table_schema = $1 and tc.table_name = $2
+           and tc.constraint_type = 'PRIMARY KEY'",
+    )
+    .bind(&sch)
+    .bind(&tbl)
+    .fetch_all(p)
+    .await
+    .map_err(err)?;
+    let pks: Vec<String> = keys.into_iter().map(|(c,)| c).collect();
+
+    // svv_table_info มีเฉพาะตารางจริงที่มีข้อมูลแล้ว — view หรือตารางว่างจะไม่เจอ
+    let info: Option<(i64, String)> = sqlx::query_as(
+        "select coalesce(tbl_rows, 0)::bigint, coalesce(size, 0)::text || ' MB'
+         from svv_table_info where \"schema\" = $1 and \"table\" = $2",
+    )
+    .bind(&sch)
+    .bind(&tbl)
+    .fetch_optional(p)
+    .await
+    .unwrap_or(None);
+
+    let rels: Vec<(String, String, String, String)> = sqlx::query_as(
+        "select case when tc.table_schema = $1 and tc.table_name = $2 then 'out' else 'in' end,
+                tc.constraint_name,
+                case when tc.table_schema = $1 and tc.table_name = $2
+                     then ccu.table_schema || '.' || ccu.table_name
+                     else tc.table_schema || '.' || tc.table_name end,
+                'FOREIGN KEY (' || kcu.column_name || ') REFERENCES ' ||
+                    ccu.table_schema || '.' || ccu.table_name || ' (' || ccu.column_name || ')'
+         from information_schema.table_constraints tc
+         join information_schema.key_column_usage kcu
+           on kcu.constraint_name = tc.constraint_name
+         join information_schema.constraint_column_usage ccu
+           on ccu.constraint_name = tc.constraint_name
+         where tc.constraint_type = 'FOREIGN KEY'
+           and ((tc.table_schema = $1 and tc.table_name = $2)
+                or (ccu.table_schema = $1 and ccu.table_name = $2))
+         order by 1, 2",
+    )
+    .bind(&sch)
+    .bind(&tbl)
+    .fetch_all(p)
+    .await
+    .unwrap_or_default();
+
+    Ok(TableProps {
+        columns: cols
+            .into_iter()
+            .map(|(name, data_type, nullable, default)| ColumnInfo {
+                pk: pks.contains(&name),
+                name,
+                data_type,
+                nullable,
+                default,
+            })
+            .collect(),
+        approx_rows: info.as_ref().map(|(r, _)| *r).unwrap_or(0),
+        size: info.map(|(_, s)| s).unwrap_or_else(|| "-".into()),
+        relations: rels
+            .into_iter()
+            .map(|(dir, name, other, def)| Relation {
+                dir,
+                name,
+                other,
+                def,
+            })
+            .collect(),
+    })
+}
+
 #[derive(Serialize)]
 struct Edge {
     src: String,
@@ -253,8 +467,28 @@ struct Edge {
 /// FK ทุกเส้นใน database — ใช้วาด ER diagram
 #[tauri::command]
 async fn er_edges(conn: String, state: tauri::State<'_, AppState>) -> R<Vec<Edge>> {
-    let p = pool(&state, &conn).await?;
-    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+    let d = db(&state, &conn).await?;
+    let p = d.pool;
+    let rows: Vec<(String, String, String, String)> = if d.engine == Engine::Redshift {
+        sqlx::query_as(
+            "select tc.table_schema || '.' || tc.table_name,
+                    kcu.column_name,
+                    ccu.table_schema || '.' || ccu.table_name,
+                    ccu.column_name
+             from information_schema.table_constraints tc
+             join information_schema.key_column_usage kcu
+               on kcu.constraint_name = tc.constraint_name
+             join information_schema.constraint_column_usage ccu
+               on ccu.constraint_name = tc.constraint_name
+             where tc.constraint_type = 'FOREIGN KEY'
+               and tc.table_schema not in ('pg_catalog', 'information_schema')
+             order by 1, 3",
+        )
+        .fetch_all(&p)
+        .await
+        .map_err(err)?
+    } else {
+        sqlx::query_as(
         "select con.conrelid::regclass::text,
                 (select string_agg(a.attname, ', ' order by k.ord)
                    from unnest(con.conkey) with ordinality k(attnum, ord)
@@ -268,10 +502,11 @@ async fn er_edges(conn: String, state: tauri::State<'_, AppState>) -> R<Vec<Edge
          join pg_namespace n on n.oid = c.relnamespace
          where con.contype = 'f' and n.nspname not in ('pg_catalog','information_schema')
          order by 1, 3",
-    )
-    .fetch_all(&p)
-    .await
-    .map_err(err)?;
+        )
+        .fetch_all(&p)
+        .await
+        .map_err(err)?
+    };
     Ok(rows
         .into_iter()
         .map(|(src, src_cols, dst, dst_cols)| Edge {
@@ -313,7 +548,8 @@ async fn column_values(
     {
         return Err("ชื่อตารางไม่ถูกต้อง".into());
     }
-    let p = pool(&state, &conn).await?;
+    let d = db(&state, &conn).await?;
+    let p = d.pool;
     let sql = format!(
         "select {c}::text as v from {t}
          where {c} is not null and {c}::text ilike $1
@@ -325,10 +561,13 @@ async fn column_values(
 
     // อ่านอย่างเดียว — จบด้วย rollback เสมอ ไม่มีทางเขียนอะไรลง DB
     let mut tx = p.begin().await.map_err(err)?;
-    sqlx::query("set local statement_timeout = 5000")
-        .execute(&mut *tx)
-        .await
-        .map_err(err)?;
+    // Redshift ไม่มี SET LOCAL statement_timeout — ข้ามไป rollback ก็ยังคุมความปลอดภัยอยู่
+    if d.engine == Engine::Postgres {
+        sqlx::query("set local statement_timeout = 5000")
+            .execute(&mut *tx)
+            .await
+            .map_err(err)?;
+    }
     let rows: Result<Vec<(String,)>, _> = sqlx::query_as(&sql).bind(&pattern).fetch_all(&mut *tx).await;
     tx.rollback().await.ok();
     Ok(rows.map_err(err)?.into_iter().map(|(v,)| v).collect())
@@ -463,25 +702,44 @@ async fn update_cell(
     Ok(n)
 }
 
-fn is_read_query(sql: &str) -> bool {
+/// ห่อเป็น subquery เพื่อตัดจำนวนแถวฝั่ง server ได้ไหม
+/// (show / explain / คำสั่งเขียน ห่อไม่ได้ ต้องส่งดิบ)
+fn wrappable(sql: &str) -> bool {
     let head = sql
         .lines()
         .map(str::trim)
         .find(|l| !l.is_empty() && !l.starts_with("--"))
         .unwrap_or("")
         .to_ascii_lowercase();
-    ["select", "with", "table ", "values", "show", "explain"]
+    ["select", "with", "table ", "values"]
         .iter()
         .any(|k| head.starts_with(k))
 }
 
-// ponytail: ให้ Postgres serialize ผลลัพธ์เป็น JSON เอง (json_agg) แทน decode ทีละ type
-// ฝั่ง Rust — ครอบคลุมทุก type รวม array/jsonb/range โดยไม่ต้องเขียน mapping เลย
-// ราคาที่จ่ายคือทั้งชุดอยู่ใน memory ครั้งเดียว จึงตัดที่ MAX_ROWS
-// อยาก stream ระดับล้านแถวค่อยเปลี่ยนไป decode raw + server-side cursor
+// ponytail: อ่านค่าจาก simple query protocol ซึ่งส่งทุก type มาเป็น text อยู่แล้ว
+// จึงไม่ต้อง decode ตาม type และไม่ต้องพึ่ง json_agg (ที่ Redshift ไม่มี)
+// map เป็น number/bool เฉพาะ type พื้นฐานพอให้ตารางเรียงลำดับถูก ที่เหลือเป็น string
+fn cell_json(row: &sqlx::postgres::PgRow, i: usize) -> R<serde_json::Value> {
+    let v = row.try_get_raw(i).map_err(err)?;
+    if v.is_null() {
+        return Ok(serde_json::Value::Null);
+    }
+    let ty = v.type_info().name().to_ascii_uppercase();
+    let text = v.as_str().map_err(err)?.to_string();
+    Ok(match ty.as_str() {
+        "INT2" | "INT4" | "INT8" | "FLOAT4" | "FLOAT8" | "NUMERIC" => {
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text))
+        }
+        "BOOL" => serde_json::Value::Bool(text == "t" || text == "true"),
+        _ => serde_json::Value::String(text),
+    })
+}
+
 #[tauri::command]
 async fn run_query(sql: String, conn: String,
     state: tauri::State<'_, AppState>) -> R<QueryResult> {
+    use futures_util::TryStreamExt;
+
     let p = pool(&state, &conn).await?;
     let t0 = Instant::now();
     let trimmed = sql.trim().trim_end_matches(';').trim().to_string();
@@ -489,37 +747,50 @@ async fn run_query(sql: String, conn: String,
         return Err("ไม่มี SQL ให้รัน".into());
     }
 
-    if !is_read_query(&trimmed) {
-        let res = sqlx::raw_sql(&trimmed).execute(&p).await.map_err(err)?;
-        return Ok(QueryResult {
-            columns: vec![],
-            rows: vec![],
-            affected: res.rows_affected(),
-            elapsed_ms: t0.elapsed().as_millis(),
-            truncated: false,
-        });
+    // ดึงเกินมา 1 แถวเพื่อรู้ว่ามีต่ออีกไหม แล้วค่อยตัดทิ้ง
+    let capped = wrappable(&trimmed);
+    let to_run = if capped {
+        format!("select * from ({}) _mdb limit {}", trimmed, MAX_ROWS + 1)
+    } else {
+        trimmed.clone()
+    };
+
+    let mut columns: Vec<String> = Vec::new();
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let mut affected: u64 = 0;
+    let mut seen: usize = 0;
+
+    let mut stream = sqlx::raw_sql(&to_run).fetch_many(&p);
+    while let Some(item) = stream.try_next().await.map_err(err)? {
+        match item {
+            sqlx::Either::Left(res) => affected += res.rows_affected(),
+            sqlx::Either::Right(row) => {
+                if columns.is_empty() {
+                    columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+                }
+                seen += 1;
+                if rows.len() < MAX_ROWS {
+                    let mut obj = serde_json::Map::with_capacity(columns.len());
+                    for (i, c) in columns.iter().enumerate() {
+                        obj.insert(c.clone(), cell_json(&row, i)?);
+                    }
+                    rows.push(serde_json::Value::Object(obj));
+                }
+            }
+        }
+    }
+    drop(stream);
+
+    // ผลลัพธ์ว่างยังอยากรู้ชื่อคอลัมน์ — ถามจาก describe (พังก็ปล่อยผ่าน)
+    if columns.is_empty() && capped {
+        if let Ok(desc) = p.describe(&trimmed).await {
+            columns = desc.columns().iter().map(|c| c.name().to_string()).collect();
+        }
     }
 
-    let described = p.describe(&trimmed).await.map_err(err)?;
-    let columns: Vec<String> = described
-        .columns()
-        .iter()
-        .map(|c| c.name().to_string())
-        .collect();
-
-    let wrapped = format!(
-        "select coalesce(json_agg(_t), '[]'::json)::text from (select * from ({}) _q limit {}) _t",
-        trimmed, MAX_ROWS
-    );
-    let raw: String = sqlx::query_scalar(&wrapped)
-        .fetch_one(&p)
-        .await
-        .map_err(err)?;
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&raw).map_err(err)?;
-
     Ok(QueryResult {
-        truncated: rows.len() >= MAX_ROWS,
-        affected: rows.len() as u64,
+        truncated: seen > MAX_ROWS,
+        affected: if columns.is_empty() { affected } else { seen as u64 },
         columns,
         rows,
         elapsed_ms: t0.elapsed().as_millis(),
@@ -596,7 +867,11 @@ fn export_sql(
 #[tauri::command]
 async fn import_csv(path: String, table: String, conn: String,
     state: tauri::State<'_, AppState>) -> R<u64> {
-    let p = pool(&state, &conn).await?;
+    let d = db(&state, &conn).await?;
+    if d.engine == Engine::Redshift {
+        return import_csv_insert(&d.pool, &path, &table).await;
+    }
+    let p = d.pool;
     let bytes = std::fs::read(&path).map_err(err)?;
     let header = String::from_utf8_lossy(&bytes)
         .lines()
@@ -620,6 +895,68 @@ async fn import_csv(path: String, table: String, conn: String,
     copy.finish().await.map_err(err)
 }
 
+/// Redshift ไม่รับ COPY FROM STDIN (COPY ของมันอ่านจาก S3 เท่านั้น) — ใช้ INSERT
+/// ทีละก้อนแทน ช้ากว่ามากแต่ใช้ได้กับไฟล์ระดับหลักหมื่นแถวที่คนกดผ่าน UI จริง ๆ
+// ponytail: batch 500 แถว ไฟล์ระดับล้านแถวควรไปทาง COPY จาก S3 แทน
+async fn import_csv_insert(p: &PgPool, path: &str, table: &str) -> R<u64> {
+    const BATCH: usize = 500;
+    let mut rdr = csv::Reader::from_path(path).map_err(err)?;
+    let headers = rdr.headers().map_err(err)?.clone();
+    let cols = headers
+        .iter()
+        .map(|c| ident(c.trim()))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut done: u64 = 0;
+    let mut batch: Vec<String> = Vec::with_capacity(BATCH);
+    let flush = |batch: &mut Vec<String>| -> Option<String> {
+        if batch.is_empty() {
+            return None;
+        }
+        let sql = format!(
+            "insert into {} ({}) values {}",
+            table,
+            cols,
+            batch.join(", ")
+        );
+        batch.clear();
+        Some(sql)
+    };
+
+    for rec in rdr.records() {
+        let rec = rec.map_err(err)?;
+        batch.push(format!(
+            "({})",
+            rec.iter()
+                .map(|v| if v.is_empty() {
+                    "NULL".to_string()
+                } else {
+                    lit(&Some(v.to_string()))
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        if batch.len() == BATCH {
+            if let Some(sql) = flush(&mut batch) {
+                done += sqlx::raw_sql(&sql)
+                    .execute(p)
+                    .await
+                    .map_err(err)?
+                    .rows_affected();
+            }
+        }
+    }
+    if let Some(sql) = flush(&mut batch) {
+        done += sqlx::raw_sql(&sql)
+            .execute(p)
+            .await
+            .map_err(err)?
+            .rows_affected();
+    }
+    Ok(done)
+}
+
 // ponytail: เครื่องนี้ไม่มี pg_dump จึง generate dump เอง — DDL อ่านจาก pg_catalog
 // (format_type / pg_get_constraintdef / pg_get_viewdef ให้ Postgres ประกอบให้แทนที่จะเดาเอง)
 // ส่วน data stream ทีละแถวด้วย row_to_json แล้วเขียนลงไฟล์เลย ไม่กองใน memory
@@ -631,7 +968,12 @@ async fn backup_database(path: String, conn: String,
     use std::io::Write;
 
     const BATCH: usize = 100;
-    let p = pool(&state, &conn).await?;
+    let d = db(&state, &conn).await?;
+    if d.engine == Engine::Redshift {
+        return Err("Redshift ยังไม่รองรับ backup ทั้ง database                     (ไม่มี pg_get_constraintdef / pg_indexes) — ใช้ UNLOAD ไป S3 แทน"
+            .into());
+    }
+    let p = d.pool;
     let f = std::fs::File::create(&path).map_err(err)?;
     let mut out = std::io::BufWriter::new(f);
 
@@ -871,7 +1213,7 @@ pub fn run() {
 
     builder
         .manage(AppState {
-            pools: Mutex::new(HashMap::new()),
+            conns: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             connect,
@@ -904,11 +1246,26 @@ mod tests {
 
     #[test]
     fn read_vs_write() {
-        assert!(is_read_query("select 1"));
-        assert!(is_read_query("  SELECT * FROM t"));
-        assert!(is_read_query("-- comment\nwith x as (select 1) select * from x"));
-        assert!(!is_read_query("insert into t values (1)"));
-        assert!(!is_read_query("create table t (id int)"));
+        assert!(wrappable("select 1"));
+        assert!(wrappable("  SELECT * FROM t"));
+        assert!(wrappable("-- comment\nwith x as (select 1) select * from x"));
+        assert!(!wrappable("insert into t values (1)"));
+        assert!(!wrappable("create table t (id int)"));
+        assert!(!wrappable("explain select 1"));
+    }
+
+    #[test]
+    fn qualified_names_split() {
+        assert_eq!(split_name("\"public\".\"users\""), ("public".into(), "users".into()));
+        assert_eq!(split_name("sales.orders"), ("sales".into(), "orders".into()));
+        assert_eq!(split_name("users"), ("public".into(), "users".into()));
+        assert_eq!(split_name("\"users\""), ("public".into(), "users".into()));
+    }
+
+    #[test]
+    fn redshift_detected_from_version() {
+        assert!(detect("PostgreSQL 8.0.2 on i686-pc-linux-gnu, Redshift 1.0.63590") == Engine::Redshift);
+        assert!(detect("PostgreSQL 17.6 on x86_64-pc-linux-gnu") == Engine::Postgres);
     }
 
     #[test]
