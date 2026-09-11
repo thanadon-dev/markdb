@@ -1514,3 +1514,19 @@ select:focus {
   background: var(--panel-2);
   color: var(--text);
 }
+
+/* ---------- ลากคลุมช่วง cell แบบ Excel ---------- */
+
+.cell.inrange,
+.grid-row.sel .cell.inrange {
+  background: #16263f !important;
+}
+
+/* กรอบรอบช่วงที่คลุม — ชิ้นเดียววางทับ ไม่ต้องใส่ border ทีละ cell */
+.rangebox {
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+  border: 1.5px solid #4a8cff;
+  border-radius: 3px;
+}
