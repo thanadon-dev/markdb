@@ -1356,3 +1356,32 @@ select:focus {
   color: var(--dim);
   font-size: 11.5px;
 }
+
+.ctxsep {
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--border);
+}
+
+.ctxmenu button.bad {
+  color: var(--red);
+}
+
+.ctxmenu button.bad:hover {
+  background: rgba(255, 107, 107, 0.12);
+}
+
+.chk {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  margin: 12px 0;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.chk input {
+  width: auto;
+  margin-top: 2px;
+  accent-color: var(--red);
+}
