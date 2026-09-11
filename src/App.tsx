@@ -162,6 +162,12 @@ const mb = (n: number) => (n / 1_048_576).toFixed(1);
 const uid = () => Math.random().toString(36).slice(2, 9);
 const qname = (t: TableInfo) => `"${t.schema}"."${t.name}"`;
 
+const Close = ({ on }: { on: () => void }) => (
+  <button className="modal-x" onClick={on} title="ปิด (Esc)">
+    <X size={14} weight="bold" />
+  </button>
+);
+
 const connUrl = (c: Conn) => {
   if (c.url) return c.url;
   const auth = c.pass
@@ -883,6 +889,26 @@ export default function App() {
     setToast(m);
     setTimeout(() => setToast(""), 3000);
   }, []);
+
+  /* Esc ปิดสิ่งที่เปิดอยู่ — modal ที่มีข้อมูลพิมพ์ค้างไม่ปิดตอนคลิกนอกแล้ว
+     Esc กับปุ่มกากบาทจึงเป็นทางออก ไล่จากชั้นบนสุดลงล่าง */
+  useEffect(() => {
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (tblMenu) return setTblMenu(null);
+      if (danger) return setDanger(null);
+      if (addRow) return setAddRow(null);
+      if (confirmDel) return setConfirmDel(null);
+      if (restoreFile) return setRestoreFile(null);
+      if (props) return setProps(null);
+      if (exportOpen) return setExportOpen(false);
+      if (erOpen) return setErOpen(false);
+      if (form) return setForm(null);
+      if (updatesOpen && pct === null) setUpdatesOpen(false);
+    };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [tblMenu, danger, addRow, confirmDel, restoreFile, props, exportOpen, erOpen, form, updatesOpen, pct]);
 
   const patch = useCallback(
     (id: string, p: Partial<Tab>) =>
@@ -1765,8 +1791,9 @@ export default function App() {
       </main>
 
       {form && (
-        <div className="overlay" onClick={() => setForm(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="overlay">
+          <div className="modal">
+            <Close on={() => setForm(null)} />
             <h3>
               <Plug size={17} weight="duotone" /> Connection
             </h3>
@@ -1897,8 +1924,9 @@ export default function App() {
       )}
 
       {addRow && (
-        <div className="overlay" onClick={() => setAddRow(null)}>
-          <div className="modal wide" onClick={(e) => e.stopPropagation()}>
+        <div className="overlay">
+          <div className="modal wide">
+            <Close on={() => setAddRow(null)} />
             <h3>
               <RowsPlusBottom size={17} weight="duotone" /> เพิ่มแถวใน {tab?.title}
             </h3>
@@ -1985,8 +2013,9 @@ export default function App() {
       )}
 
       {danger && (
-        <div className="overlay" onClick={() => setDanger(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="overlay">
+          <div className="modal">
+            <Close on={() => setDanger(null)} />
             <h3>
               {danger.op === "truncate" ? (
                 <Eraser size={17} weight="duotone" />
@@ -2086,6 +2115,7 @@ export default function App() {
       {confirmDel && (
         <div className="overlay" onClick={() => setConfirmDel(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <Close on={() => setConfirmDel(null)} />
             <h3>
               <Trash size={17} weight="duotone" /> ลบแถวนี้?
             </h3>
@@ -2191,6 +2221,7 @@ export default function App() {
       {restoreFile && (
         <div className="overlay" onClick={() => setRestoreFile(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <Close on={() => setRestoreFile(null)} />
             <h3>
               <ArrowCounterClockwise size={17} weight="duotone" /> ยืนยันการ restore
             </h3>
@@ -2220,6 +2251,7 @@ export default function App() {
       {exportOpen && tab?.res && (
         <div className="overlay" onClick={() => setExportOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <Close on={() => setExportOpen(false)} />
             <h3>
               <DownloadSimple size={17} weight="duotone" /> Export ผลลัพธ์
             </h3>
@@ -2277,6 +2309,7 @@ export default function App() {
       {props && (
         <div className="overlay" onClick={() => setProps(null)}>
           <div className="modal wide" onClick={(e) => e.stopPropagation()}>
+            <Close on={() => setProps(null)} />
             <h3>
               <TableIcon size={17} weight="duotone" />
               {props.table.schema}.{props.table.name}
