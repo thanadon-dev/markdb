@@ -34,6 +34,9 @@ import {
   MagnifyingGlass,
   PencilSimple,
   Info,
+  CaretLeft,
+  CaretRight,
+  Rows,
   Copy as CopyIcon,
   Eraser,
   ClipboardText,
@@ -458,6 +461,7 @@ const Grid = memo(function Grid({
   pk,
   editable,
   filter,
+  mode,
   onEdit,
   onCopy,
   onSelect,
@@ -467,6 +471,7 @@ const Grid = memo(function Grid({
   pk: string[];
   editable: boolean;
   filter: string;
+  mode: "grid" | "record";
   onEdit: (rowIndex: number, column: string, value: string | null) => void;
   onCopy: (text: string) => void;
   onSelect: (rows: number[]) => void;
@@ -581,7 +586,8 @@ const Grid = memo(function Grid({
     setEditing(true);
   };
 
-  /* บันทึกแล้วไปต่อ: 1 = ลงแถวล่าง (Enter), 2 = ไปคอลัมน์ขวา (Tab) */
+  /* บันทึกแล้วไปต่อ: 1 = ลงแถวล่าง (Enter), 2 = ไปคอลัมน์ขวา (Tab)
+     โหมด record เรียงคอลัมน์ลงมา "ล่าง" จึงหมายถึงคอลัมน์ถัดไป ไม่ใช่แถวถัดไป */
   const commit = (move: 1 | 2) => {
     if (!cur) return;
     const ri = order[cur.r];
@@ -590,8 +596,37 @@ const Grid = memo(function Grid({
     parent.current?.focus();
     if (draft !== cellText(res.rows[ri][col]))
       onEdit(ri, col, draft.toUpperCase() === "NULL" ? null : draft);
-    moveTo(move === 1 ? cur.r + 1 : cur.r, move === 2 ? cur.c + 1 : cur.c);
+    if (mode === "record")
+      setCur({ r: cur.r, c: Math.min(res.columns.length - 1, cur.c + 1) });
+    else moveTo(move === 1 ? cur.r + 1 : cur.r, move === 2 ? cur.c + 1 : cur.c);
   };
+
+  /* ช่องแก้ค่า — ใช้ตัวเดียวกันทั้งโหมด grid และ record */
+  const editBox = (key?: string) => (
+    <div key={key} className="cell editing">
+      <input
+        autoFocus
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => setEditing(false)}
+        onKeyDown={(e) => {
+          const save =
+            e.key === "Enter" || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s");
+          if (save) {
+            e.preventDefault();
+            commit(1);
+          } else if (e.key === "Tab") {
+            e.preventDefault();
+            commit(2);
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            setEditing(false);
+            parent.current?.focus();
+          }
+        }}
+      />
+    </div>
+  );
 
   const onKey = (e: React.KeyboardEvent) => {
     if (editing) return;
@@ -636,6 +671,89 @@ const Grid = memo(function Grid({
         </div>
       </div>
     );
+
+  /* โหมด record — หนึ่งแถว คอลัมน์เรียงลงมา ใช้ cur ตัวเดียวกับ grid
+     สลับโหมดไปมาจึงยังยืนอยู่ที่แถวเดิม */
+  if (mode === "record") {
+    const vr = Math.min(Math.max(cur?.r ?? 0, 0), Math.max(0, order.length - 1));
+    const row = order.length ? res.rows[order[vr]] : null;
+    const go = (d: number) => {
+      setEditing(false);
+      const nr = Math.max(0, Math.min(order.length - 1, vr + d));
+      setCur({ r: nr, c: cur?.c ?? 0 });
+      // บอก toolbar ด้วยว่าตอนนี้ยืนอยู่แถวไหน ปุ่ม Delete row จะได้ทำงานในโหมดนี้
+      if (order.length) onSelect([order[nr]]);
+    };
+    return (
+      <div
+        className="result record"
+        ref={parent}
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (editing) return;
+          const step = { PageDown: 1, PageUp: -1, ArrowRight: 1, ArrowLeft: -1 }[e.key];
+          if (step) {
+            e.preventDefault();
+            go(step);
+          } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            setCur({
+              r: vr,
+              c: Math.max(
+                0,
+                Math.min(res.columns.length - 1, (cur?.c ?? 0) + (e.key === "ArrowDown" ? 1 : -1)),
+              ),
+            });
+          } else if ((e.key === "Enter" || e.key === "F2") && cur) {
+            e.preventDefault();
+            startEdit(vr, cur.c);
+          }
+        }}
+      >
+        <div className="rec-head">
+          <button onClick={() => go(-1)} disabled={vr <= 0} title="แถวก่อนหน้า (←)">
+            <CaretLeft size={14} weight="bold" />
+          </button>
+          <b>Row #{order.length ? vr + 1 : 0}</b>
+          <span>จาก {order.length.toLocaleString()} แถว</span>
+          <button
+            onClick={() => go(1)}
+            disabled={vr >= order.length - 1}
+            title="แถวถัดไป (→)"
+          >
+            <CaretRight size={14} weight="bold" />
+          </button>
+        </div>
+        {!row ? (
+          <div className="nomatch">{filter ? `ไม่มีแถวที่ตรงกับ “${filter}”` : "ไม่มีแถว"}</div>
+        ) : (
+          <div className="rec-body">
+            {res.columns.map((c, ci) => (
+              <div key={c} className={"rec-row" + (cur?.c === ci ? " on" : "")}>
+                <div className={"rec-name" + (pk.includes(c) ? " pk" : "")}>
+                  {pk.includes(c) ? `🔑 ${c}` : c}
+                </div>
+                {editing && cur?.c === ci ? (
+                  editBox()
+                ) : (
+                  <div
+                    className={cellClass(row[c])}
+                    title={cellText(row[c])}
+                    onMouseDown={() => (setCur({ r: vr, c: ci }), onSelect([order[vr]]))}
+                    onDoubleClick={() =>
+                      editable ? startEdit(vr, ci) : onCopy(cellText(row[c]))
+                    }
+                  >
+                    {cellText(row[c])}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="result grid" ref={parent} tabIndex={0} onKeyDown={onKey}>
@@ -682,33 +800,7 @@ const Grid = memo(function Grid({
             >
               {res.columns.map((c, ci) => {
                 const here = cur?.r === vi.index && cur.c === ci;
-                if (here && editing)
-                  return (
-                    <div key={c} className="cell editing">
-                      <input
-                        autoFocus
-                        value={draft}
-                        onChange={(e) => setDraft(e.target.value)}
-                        onBlur={() => setEditing(false)}
-                        onKeyDown={(e) => {
-                          const save =
-                            e.key === "Enter" ||
-                            ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s");
-                          if (save) {
-                            e.preventDefault();
-                            commit(1);
-                          } else if (e.key === "Tab") {
-                            e.preventDefault();
-                            commit(2);
-                          } else if (e.key === "Escape") {
-                            e.preventDefault();
-                            setEditing(false);
-                            parent.current?.focus();
-                          }
-                        }}
-                      />
-                    </div>
-                  );
+                if (here && editing) return editBox(c);
                 return (
                   <div
                     key={c}
@@ -794,6 +886,7 @@ export default function App() {
   const [rels, setRels] = useState<Release[] | null>(null);
   const [relErr, setRelErr] = useState("");
   const [gridFilter, setGridFilter] = useState("");
+  const [mode, setMode] = useState<"grid" | "record">("grid");
   const [selRows, setSelRows] = useState<number[]>([]);
   const [confirmDel, setConfirmDel] = useState<Record<string, unknown> | null>(null);
   const [stage, setStage] = useState("");
@@ -1688,6 +1781,22 @@ export default function App() {
           >
             <Trash size={15} weight="duotone" /> Delete row
           </button>
+          <div className="seg">
+            <button
+              className={mode === "grid" ? "on" : ""}
+              onClick={() => setMode("grid")}
+              title="ดูเป็นตาราง"
+            >
+              <TableIcon size={14} weight="duotone" /> Grid
+            </button>
+            <button
+              className={mode === "record" ? "on" : ""}
+              onClick={() => setMode("record")}
+              title="ดูทีละแถว คอลัมน์เรียงลงมา"
+            >
+              <Rows size={14} weight="duotone" /> Record
+            </button>
+          </div>
           <div className="filterbox">
             <MagnifyingGlass size={13} />
             <input
@@ -1743,6 +1852,7 @@ export default function App() {
             pk={rowKey ?? []}
             editable={editable}
             filter={gridFilter}
+            mode={mode}
             onEdit={editCell}
             onSelect={setSelRows}
             onExportJson={(rows) => exportAs("json", rows)}
