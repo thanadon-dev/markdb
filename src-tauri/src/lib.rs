@@ -824,6 +824,12 @@ fn export_csv(path: String, columns: Vec<String>, rows: Vec<serde_json::Value>) 
     Ok(rows.len())
 }
 
+#[tauri::command]
+fn export_json(path: String, rows: Vec<serde_json::Value>) -> R<usize> {
+    std::fs::write(&path, serde_json::to_string_pretty(&rows).map_err(err)?).map_err(err)?;
+    Ok(rows.len())
+}
+
 fn sql_literal(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::Null => "NULL".into(),
@@ -1231,6 +1237,7 @@ pub fn run() {
             run_query,
             export_csv,
             export_sql,
+            export_json,
             import_csv,
             import_sql,
             backup_database

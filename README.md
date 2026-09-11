@@ -11,7 +11,9 @@ Postgres / Amazon Redshift client ที่เบาและเร็ว — Ta
 - **Autocomplete** — ชื่อตาราง, ชื่อคอลัมน์ของตารางใน `FROM`, และ**ค่าจริงในคอลัมน์**ตอนพิมพ์ `where col = '` เลือกด้วย `Tab` หรือ `Enter`
 - **Backup / Restore** ทั้ง database เป็นไฟล์ `.sql` เดียว ไม่ต้องมี `pg_dump`
 - **Import / Export** CSV (UTF-8 + BOM อ่านภาษาไทยใน Excel ได้) และ SQL
-- **คลิกขวาที่ตาราง** → properties: คอลัมน์, type, nullable, default, ขนาด, จำนวนแถวโดยประมาณ
+- **คลิกขวาที่ตาราง** (ซ้ายมือ) → เมนู: Open (run SELECT), New query, Properties (คอลัมน์, type, nullable, default, ขนาด, จำนวนแถวโดยประมาณ), ER diagram
+- **เลือกแถวในผลลัพธ์** — คลิก = แถวเดียว, `Ctrl+คลิก` = ทีละแถว, `Shift+คลิก` = ทั้งช่วง
+- **คลิกขวาที่แถว** → Copy row (tab-separated วางลง Excel ได้), Copy as JSON, Export as JSON
 - Grid virtualize — ผลลัพธ์หลักพันแถวเลื่อนลื่น ไม่หน่วง
 - ธีมดำสนิท ตัวอักษรขาว, SQL keyword ไฮไลต์สีและตัวใหญ่กว่า
 
