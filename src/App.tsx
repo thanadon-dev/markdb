@@ -24,6 +24,8 @@ import {
   CheckCircle,
   Database,
   DownloadSimple,
+  Copy,
+  BracketsCurly,
   Confetti,
   Eye,
   FloppyDisk,
@@ -31,6 +33,7 @@ import {
   LinkSimple,
   MagnifyingGlass,
   PencilSimple,
+  Info,
   Play,
   Plug,
   Plus,
@@ -449,6 +452,7 @@ const Grid = memo(function Grid({
   onEdit,
   onCopy,
   onSelect,
+  onExportJson,
 }: {
   res: QueryResult;
   pk: string[];
@@ -456,13 +460,16 @@ const Grid = memo(function Grid({
   filter: string;
   onEdit: (rowIndex: number, column: string, value: string | null) => void;
   onCopy: (text: string) => void;
-  onSelect: (rowIndex: number) => void;
+  onSelect: (rows: number[]) => void;
+  onExportJson: (rows: Record<string, unknown>[]) => void;
 }) {
   const parent = useRef<HTMLDivElement>(null);
   // cur ชี้ด้วย "ลำดับที่เห็นบนจอ" (index ใน order) ไม่ใช่ index จริงของแถว
   // การกดลูกศรจึงเดินตามที่ตาเห็นแม้กำลังกรองหรือเรียงอยู่
   const [cur, setCur] = useState<{ r: number; c: number } | null>(null);
-  const [selRow, setSelRow] = useState(-1);
+  const [sel, setSel] = useState<Set<number>>(() => new Set());
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const anchor = useRef(-1); // แถว (ลำดับบนจอ) ที่ใช้เป็นจุดตั้งต้นของ shift+click
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [sort, setSort] = useState<{ col: string; dir: "asc" | "desc" } | null>(null);
@@ -506,6 +513,7 @@ const Grid = memo(function Grid({
   useEffect(() => {
     setCur(null);
     setEditing(false);
+    setSel(new Set());
   }, [res.columns]);
 
   const rv = useVirtualizer({
@@ -525,10 +533,36 @@ const Grid = memo(function Grid({
     const rr = Math.max(0, Math.min(order.length - 1, r));
     const cc = Math.max(0, Math.min(res.columns.length - 1, c));
     setCur({ r: rr, c: cc });
-    setSelRow(order[rr]);
-    onSelect(order[rr]);
+    anchor.current = rr;
+    setSel(new Set([order[rr]]));
+    onSelect([order[rr]]);
     rv.scrollToIndex(rr);
   };
+
+  /* คลิกเลือกแถว: ธรรมดา = แถวเดียว, Ctrl = สลับทีละแถว, Shift = ทั้งช่วง */
+  const pick = (vr: number, e: React.MouseEvent) => {
+    const ri = order[vr];
+    let next: Set<number>;
+    if (e.shiftKey && anchor.current >= 0) {
+      const [a, b] = anchor.current < vr ? [anchor.current, vr] : [vr, anchor.current];
+      next = new Set(order.slice(a, b + 1));
+    } else {
+      if (e.ctrlKey || e.metaKey) {
+        next = new Set(sel);
+        if (!next.delete(ri)) next.add(ri);
+      } else {
+        next = new Set([ri]);
+      }
+      anchor.current = vr;
+    }
+    setSel(next);
+    onSelect([...next]);
+  };
+
+  // เรียงตามที่เห็นบนจอ ไม่ใช่ตามลำดับที่คลิก — copy/export จะได้ตรงกับตา
+  const picked = () => order.filter((i) => sel.has(i)).map((i) => res.rows[i]);
+  const asTsv = (rows: Record<string, unknown>[]) =>
+    rows.map((r) => res.columns.map((c) => cellText(r[c])).join("\t")).join("\n");
 
   const startEdit = (r: number, c: number, initial?: string) => {
     if (!editable) return;
@@ -617,15 +651,24 @@ const Grid = memo(function Grid({
           return (
             <div
               key={vi.key}
-              className={"grid-row" + (selRow === ri ? " sel" : "")}
+              className={"grid-row" + (sel.has(ri) ? " sel" : "")}
               style={{
                 gridTemplateColumns: template,
                 height: ROW_H,
                 transform: `translateY(${vi.start}px)`,
               }}
-              onClick={() => {
-                setSelRow(ri);
-                onSelect(ri);
+              onMouseDown={(e) => {
+                // คลิกพื้นที่ว่างขวาสุดของแถว (เลยคอลัมน์สุดท้าย) ให้เลือกแถวได้เหมือนกัน
+                if (e.button === 0 && e.target === e.currentTarget) pick(vi.index, e);
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                if (!sel.has(ri)) {
+                  anchor.current = vi.index;
+                  setSel(new Set([ri]));
+                  onSelect([ri]);
+                }
+                setMenu({ x: e.clientX, y: e.clientY });
               }}
             >
               {res.columns.map((c, ci) => {
@@ -668,7 +711,11 @@ const Grid = memo(function Grid({
 พิมพ์ทับได้เลย หรือกด Enter/F2 เพื่อแก้ (พิมพ์ NULL = ค่าว่าง)`
                         : cellText(row[c])
                     }
-                    onMouseDown={() => moveTo(vi.index, ci)}
+                    onMouseDown={(e) => {
+                      if (e.button !== 0) return;
+                      setCur({ r: vi.index, c: ci });
+                      pick(vi.index, e);
+                    }}
                     onDoubleClick={() =>
                       editable ? startEdit(vi.index, ci) : onCopy(cellText(row[c]))
                     }
@@ -681,6 +728,30 @@ const Grid = memo(function Grid({
           );
         })}
       </div>
+
+      {menu && (
+        <>
+          <div
+            className="ctx-backdrop"
+            onMouseDown={() => setMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setMenu(null);
+            }}
+          />
+          <div className="ctxmenu" style={{ left: menu.x, top: menu.y }}>
+            <button onClick={() => (onCopy(asTsv(picked())), setMenu(null))}>
+              <Copy size={14} weight="duotone" /> Copy {sel.size > 1 ? `${sel.size} rows` : "row"}
+            </button>
+            <button onClick={() => (onCopy(JSON.stringify(picked(), null, 2)), setMenu(null))}>
+              <BracketsCurly size={14} weight="duotone" /> Copy as JSON
+            </button>
+            <button onClick={() => (onExportJson(picked()), setMenu(null))}>
+              <DownloadSimple size={14} weight="duotone" /> Export as JSON…
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 });
@@ -714,10 +785,11 @@ export default function App() {
   const [rels, setRels] = useState<Release[] | null>(null);
   const [relErr, setRelErr] = useState("");
   const [gridFilter, setGridFilter] = useState("");
-  const [selRow, setSelRow] = useState(-1);
+  const [selRows, setSelRows] = useState<number[]>([]);
   const [confirmDel, setConfirmDel] = useState<Record<string, unknown> | null>(null);
   const [stage, setStage] = useState("");
   const [erOpen, setErOpen] = useState(false);
+  const [tblMenu, setTblMenu] = useState<{ x: number; y: number; t: TableInfo } | null>(null);
   const [edges, setEdges] = useState<Edge[] | null>(null);
   const [addRow, setAddRow] = useState<{ cols: ColumnInfo[]; vals: Record<string, string> } | null>(
     null,
@@ -773,7 +845,7 @@ export default function App() {
   const canAddRow = !!target;
 
   useEffect(() => {
-    setSelRow(-1);
+    setSelRows([]);
     setGridFilter("");
   }, [tab?.id, tab?.res]);
 
@@ -878,13 +950,13 @@ export default function App() {
   );
 
   const openTable = useCallback(
-    (t: TableInfo) => {
+    (t: TableInfo, exec = true) => {
       const src = qname(t);
       const q = `select *\nfrom ${src}\nlimit 500;`;
       const nt = newTab(activeConn, { title: t.name, sql: q, source: src });
       setTabs((ts) => [...ts, nt]);
       setActiveTab(nt.id);
-      run(nt.id, q, activeConn);
+      if (exec) run(nt.id, q, activeConn);
     },
     [run, activeConn],
   );
@@ -897,7 +969,7 @@ export default function App() {
         say(String(e));
       }
     },
-    [say],
+    [activeConn, say],
   );
 
   /* เปิดฟอร์มเพิ่มแถว — ดึง type/default ของคอลัมน์มาโชว์เป็นคำใบ้ */
@@ -954,7 +1026,7 @@ export default function App() {
     try {
       await invoke("delete_row", { conn: tab.conn, table: target, keys });
       say("ลบแถวแล้ว");
-      setSelRow(-1);
+      setSelRows([]);
       run(tab.id, tab.sql);
     } catch (e) {
       say(String(e));
@@ -1001,19 +1073,20 @@ export default function App() {
   }, [activeConn]);
 
   const exportAs = useCallback(
-    async (kind: "csv" | "sql") => {
-      if (!tab?.res?.rows.length) return say("ไม่มีผลลัพธ์ให้ export");
+    async (kind: "csv" | "sql" | "json", only?: Record<string, unknown>[]) => {
+      const rows = only ?? tab?.res?.rows;
+      if (!tab?.res || !rows?.length) return say("ไม่มีผลลัพธ์ให้ export");
       const path = await save({
         defaultPath: `${tab.title}.${kind}`,
         filters: [{ name: kind.toUpperCase(), extensions: [kind] }],
       });
       if (!path) return;
       try {
-        const n = await invoke<number>(kind === "csv" ? "export_csv" : "export_sql", {
+        const n = await invoke<number>(`export_${kind}`, {
           path,
           table: tab.source ?? tab.title,
           columns: tab.res.columns,
-          rows: tab.res.rows,
+          rows,
         });
         say(`export ${n} แถว → ${path}`);
       } catch (e) {
@@ -1386,13 +1459,13 @@ export default function App() {
               className={
                 "tbl" + (picked?.name === t.name && picked?.schema === t.schema ? " on" : "")
               }
-              title={`${t.schema}.${t.name} — ดับเบิลคลิก = SELECT, คลิกขวา = properties`}
+              title={`${t.schema}.${t.name} — ดับเบิลคลิก = SELECT, คลิกขวา = เมนู`}
               onClick={() => setPicked(t)}
               onDoubleClick={() => openTable(t)}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setPicked(t);
-                showProps(t);
+                setTblMenu({ x: e.clientX, y: e.clientY, t });
               }}
             >
               {t.kind === "view" ? (
@@ -1500,13 +1573,15 @@ export default function App() {
           </button>
           <button
             className="btn sm"
-            onClick={() => selRow >= 0 && tab?.res && setConfirmDel(tab.res.rows[selRow])}
-            disabled={!editable || selRow < 0}
+            onClick={() =>
+              selRows.length === 1 && tab?.res && setConfirmDel(tab.res.rows[selRows[0]])
+            }
+            disabled={!editable || selRows.length !== 1}
             title={
               !editable
                 ? editReason || "ลบแถวตรง ๆ ไม่ได้กับผลลัพธ์นี้"
-                : selRow < 0
-                  ? "คลิกเลือกแถวก่อน"
+                : selRows.length !== 1
+                  ? "คลิกเลือกแถวเดียวก่อน (ลบทีละแถว)"
                   : "ลบแถวที่เลือก"
             }
           >
@@ -1568,7 +1643,8 @@ export default function App() {
             editable={editable}
             filter={gridFilter}
             onEdit={editCell}
-            onSelect={setSelRow}
+            onSelect={setSelRows}
+            onExportJson={(rows) => exportAs("json", rows)}
             onCopy={(txt) => {
               navigator.clipboard?.writeText(txt);
               say("คัดลอกแล้ว");
@@ -1600,6 +1676,11 @@ export default function App() {
               <span>
                 <b>{tab.res.elapsed_ms}</b> ms
               </span>
+              {selRows.length > 0 && (
+                <span>
+                  เลือก <b>{selRows.length}</b> แถว
+                </span>
+              )}
               {tab.res.truncated && <span>ตัดที่ 5000 แถว</span>}
             </>
           )}
@@ -1775,6 +1856,36 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {tblMenu && (
+        <>
+          <div
+            className="ctx-backdrop"
+            onMouseDown={() => setTblMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setTblMenu(null);
+            }}
+          />
+          <div className="ctxmenu" style={{ left: tblMenu.x, top: tblMenu.y }}>
+            <div className="ctxhead">
+              {tblMenu.t.schema}.{tblMenu.t.name}
+            </div>
+            <button onClick={() => (openTable(tblMenu.t), setTblMenu(null))}>
+              <Play size={13} weight="fill" /> Open (run SELECT)
+            </button>
+            <button onClick={() => (openTable(tblMenu.t, false), setTblMenu(null))}>
+              <Plus size={14} weight="bold" /> New query
+            </button>
+            <button onClick={() => (showProps(tblMenu.t), setTblMenu(null))}>
+              <Info size={14} weight="duotone" /> Properties
+            </button>
+            <button onClick={() => (openEr(), setTblMenu(null))}>
+              <TreeStructure size={14} weight="duotone" /> ER diagram
+            </button>
+          </div>
+        </>
       )}
 
       {erOpen && (
@@ -1975,6 +2086,19 @@ export default function App() {
               <div>
                 <b>SQL</b>
                 <span>INSERT statements ของ {tab.source ?? tab.title}</span>
+              </div>
+            </button>
+            <button
+              className="pick"
+              onClick={() => {
+                setExportOpen(false);
+                exportAs("json");
+              }}
+            >
+              <BracketsCurly size={20} weight="duotone" />
+              <div>
+                <b>JSON</b>
+                <span>array ของ object — คลิกขวาที่แถวเพื่อ export เฉพาะที่เลือก</span>
               </div>
             </button>
             <div className="modal-foot">
