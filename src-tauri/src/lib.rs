@@ -787,6 +787,7 @@ async fn run_query(sql: String, conn: String,
             sqlx::Either::Right(row) => {
                 if columns.is_empty() {
                     columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+                    dedupe(&mut columns);
                 }
                 seen += 1;
                 if rows.len() < MAX_ROWS {
@@ -805,6 +806,7 @@ async fn run_query(sql: String, conn: String,
     if columns.is_empty() && capped {
         if let Ok(desc) = p.describe(&trimmed).await {
             columns = desc.columns().iter().map(|c| c.name().to_string()).collect();
+            dedupe(&mut columns);
         }
     }
 
@@ -815,6 +817,24 @@ async fn run_query(sql: String, conn: String,
         rows,
         elapsed_ms: t0.elapsed().as_millis(),
     })
+}
+
+/// `select * from a join b` ให้ชื่อคอลัมน์ซ้ำได้ ซึ่งพังสองชั้น: key ใน JSON ของแถว
+/// ทับกันจนคอลัมน์หลังกลืนค่าคอลัมน์หน้า และฝั่ง UI ที่ใช้ชื่อคอลัมน์เป็น React key
+/// ก็ชนกันจน DOM เพี้ยน — เติมเลขต่อท้ายตัวที่ซ้ำตั้งแต่ต้นทางทีเดียวจบทั้งสองอย่าง
+fn dedupe(columns: &mut [String]) {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for c in columns.iter_mut() {
+        if seen.contains(c.as_str()) {
+            // ชื่อ _1 อาจมีอยู่จริงในผลลัพธ์ เลยต้องวนหาเลขที่ยังว่างจริง ๆ
+            let mut i = 1;
+            while seen.contains(&format!("{}_{}", c, i)) {
+                i += 1;
+            }
+            *c = format!("{}_{}", c, i);
+        }
+        seen.insert(c.clone());
+    }
 }
 
 fn cell_text(v: &serde_json::Value) -> String {
@@ -1280,6 +1300,23 @@ mod tests {
         assert!(!wrappable("insert into t values (1)"));
         assert!(!wrappable("create table t (id int)"));
         assert!(!wrappable("explain select 1"));
+    }
+
+    #[test]
+    fn duplicate_columns_get_suffixed() {
+        let mut c: Vec<String> = ["id", "name", "id", "id"].iter().map(|s| s.to_string()).collect();
+        dedupe(&mut c);
+        assert_eq!(c, ["id", "name", "id_1", "id_2"]);
+
+        // ชื่อ id_1 มีอยู่จริงอยู่แล้ว ตัวที่ซ้ำต้องข้ามไปเลขถัดไป ไม่ไปทับของจริง
+        let mut c: Vec<String> = ["id", "id_1", "id"].iter().map(|s| s.to_string()).collect();
+        dedupe(&mut c);
+        assert_eq!(c, ["id", "id_1", "id_2"]);
+
+        // ไม่ซ้ำต้องไม่ถูกแตะ
+        let mut c: Vec<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        dedupe(&mut c);
+        assert_eq!(c, ["a", "b"]);
     }
 
     #[test]

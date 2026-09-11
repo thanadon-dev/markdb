@@ -568,6 +568,7 @@ select:focus {
 }
 
 .modal {
+  position: relative;
   width: 460px;
   background: var(--bg-2);
   border: 1px solid var(--border);
@@ -578,6 +579,7 @@ select:focus {
 
 .modal h3 {
   margin: 0 0 4px;
+  padding-right: 30px;
   font-size: 15px;
   display: flex;
   align-items: center;
@@ -1384,4 +1386,23 @@ select:focus {
   width: auto;
   margin-top: 2px;
   accent-color: var(--red);
+}
+
+/* กากบาทปิด modal — คลิกนอกไม่ปิดแล้วสำหรับ modal ที่มีข้อมูลพิมพ์ค้าง */
+.modal-x {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.modal-x:hover {
+  background: var(--accent-soft);
+  color: var(--text);
 }
