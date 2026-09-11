@@ -483,7 +483,9 @@ const Grid = memo(function Grid({
   const [cur, setCur] = useState<{ r: number; c: number } | null>(null);
   const [sel, setSel] = useState<Set<number>>(() => new Set());
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  const anchor = useRef(-1); // แถว (ลำดับบนจอ) ที่ใช้เป็นจุดตั้งต้นของ shift+click
+  // ช่องตั้งต้นของการคลุม — คู่กับ cur เป็นมุมตรงข้ามของสี่เหลี่ยมที่เลือกอยู่
+  const [mark, setMark] = useState<{ r: number; c: number } | null>(null);
+  const dragging = useRef(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [sort, setSort] = useState<{ col: string; dir: "asc" | "desc" } | null>(null);
@@ -526,9 +528,17 @@ const Grid = memo(function Grid({
   // ถ้า reset ตามนั้นเคอร์เซอร์จะเด้งหายทุกครั้งที่กด Enter บันทึก
   useEffect(() => {
     setCur(null);
+    setMark(null);
     setEditing(false);
     setSel(new Set());
   }, [res.columns]);
+
+  // ปล่อยเมาส์นอกตารางก็ต้องจบการลาก ไม่งั้นค้างคลุมตามเมาส์ต่อ
+  useEffect(() => {
+    const up = () => (dragging.current = false);
+    window.addEventListener("mouseup", up);
+    return () => window.removeEventListener("mouseup", up);
+  }, []);
 
   const rv = useVirtualizer({
     count: order.length,
@@ -542,35 +552,73 @@ const Grid = memo(function Grid({
       s?.col !== c ? { col: c, dir: "asc" } : s.dir === "asc" ? { col: c, dir: "desc" } : null,
     );
 
+  const clampR = (r: number) => Math.max(0, Math.min(order.length - 1, r));
+  const clampC = (c: number) => Math.max(0, Math.min(res.columns.length - 1, c));
+
+  // แถวที่อยู่ในช่วงที่คลุม ส่งให้ toolbar ด้วย — Delete row / คลิกขวา copy จะได้ตรงกับที่เห็น
+  const selectRows = (a: number, b: number) => {
+    const rows = order.slice(Math.min(a, b), Math.max(a, b) + 1);
+    setSel(new Set(rows));
+    onSelect(rows);
+  };
+
+  /* ย้ายเคอร์เซอร์แล้วยุบช่วงให้เหลือช่องเดียว */
   const moveTo = (r: number, c: number) => {
     if (!order.length) return;
-    const rr = Math.max(0, Math.min(order.length - 1, r));
-    const cc = Math.max(0, Math.min(res.columns.length - 1, c));
+    const rr = clampR(r);
+    const cc = clampC(c);
     setCur({ r: rr, c: cc });
-    anchor.current = rr;
-    setSel(new Set([order[rr]]));
-    onSelect([order[rr]]);
+    setMark({ r: rr, c: cc });
+    selectRows(rr, rr);
     rv.scrollToIndex(rr);
   };
 
-  /* คลิกเลือกแถว: ธรรมดา = แถวเดียว, Ctrl = สลับทีละแถว, Shift = ทั้งช่วง */
-  const pick = (vr: number, e: React.MouseEvent) => {
-    const ri = order[vr];
-    let next: Set<number>;
-    if (e.shiftKey && anchor.current >= 0) {
-      const [a, b] = anchor.current < vr ? [anchor.current, vr] : [vr, anchor.current];
-      next = new Set(order.slice(a, b + 1));
+  /* ขยายช่วงจาก mark เดิมไปถึงช่องใหม่ — ใช้ทั้ง shift+click, shift+ลูกศร และลากเมาส์ */
+  const extendTo = (r: number, c: number) => {
+    if (!order.length) return;
+    const rr = clampR(r);
+    const cc = clampC(c);
+    setCur({ r: rr, c: cc });
+    selectRows(mark?.r ?? rr, rr);
+    rv.scrollToIndex(rr);
+  };
+
+  /* กดเมาส์ที่ช่อง: ธรรมดา = เริ่มคลุมใหม่, Shift = ขยายจากเดิม, Ctrl = สลับทีละแถว */
+  const pick = (vr: number, ci: number, e: React.MouseEvent) => {
+    if (e.shiftKey && cur) return extendTo(vr, ci);
+    setCur({ r: vr, c: ci });
+    setMark({ r: vr, c: ci });
+    if (e.ctrlKey || e.metaKey) {
+      const next = new Set(sel);
+      const ri = order[vr];
+      if (!next.delete(ri)) next.add(ri);
+      setSel(next);
+      onSelect([...next]);
     } else {
-      if (e.ctrlKey || e.metaKey) {
-        next = new Set(sel);
-        if (!next.delete(ri)) next.add(ri);
-      } else {
-        next = new Set([ri]);
-      }
-      anchor.current = vr;
+      selectRows(vr, vr);
     }
-    setSel(next);
-    onSelect([...next]);
+  };
+
+  /* สี่เหลี่ยมที่คลุมอยู่ตอนนี้ — มุมหนึ่งคือ mark อีกมุมคือ cur */
+  const rect =
+    cur && mark
+      ? {
+          r1: Math.min(mark.r, cur.r),
+          r2: Math.max(mark.r, cur.r),
+          c1: Math.min(mark.c, cur.c),
+          c2: Math.max(mark.c, cur.c),
+        }
+      : null;
+  const manyCells = !!rect && (rect.r1 !== rect.r2 || rect.c1 !== rect.c2);
+
+  /* ค่าในช่วงที่คลุม เป็น tab-separated — วางลง Excel ได้ตรงรูป */
+  const rectTsv = () => {
+    if (!rect) return "";
+    const cols = res.columns.slice(rect.c1, rect.c2 + 1);
+    return order
+      .slice(rect.r1, rect.r2 + 1)
+      .map((i) => cols.map((c) => cellText(res.rows[i][c])).join("\t"))
+      .join("\n");
   };
 
   // เรียงตามที่เห็นบนจอ ไม่ใช่ตามลำดับที่คลิก — copy/export จะได้ตรงกับตา
@@ -641,7 +689,9 @@ const Grid = memo(function Grid({
     const jump = { ArrowDown: [1, 0], ArrowUp: [-1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[k];
     if (jump) {
       e.preventDefault();
-      moveTo(cur.r + jump[0], cur.c + jump[1]);
+      const to = [cur.r + jump[0], cur.c + jump[1]] as const;
+      if (e.shiftKey) extendTo(to[0], to[1]);
+      else moveTo(to[0], to[1]);
     } else if (k === "Tab") {
       e.preventDefault();
       moveTo(cur.r, cur.c + (e.shiftKey ? -1 : 1));
@@ -653,8 +703,16 @@ const Grid = memo(function Grid({
       startEdit(cur.r, cur.c);
     } else if (k === "Escape") {
       setCur(null);
+      setMark(null);
+    } else if ((e.ctrlKey || e.metaKey) && k.toLowerCase() === "a") {
+      // Ctrl+A คลุมทั้งผลลัพธ์
+      e.preventDefault();
+      setMark({ r: 0, c: 0 });
+      setCur({ r: order.length - 1, c: res.columns.length - 1 });
+      selectRows(0, order.length - 1);
     } else if ((e.ctrlKey || e.metaKey) && k.toLowerCase() === "c") {
-      onCopy(cellText(res.rows[order[cur.r]][res.columns[cur.c]]));
+      e.preventDefault();
+      onCopy(manyCells ? rectTsv() : cellText(res.rows[order[cur.r]][res.columns[cur.c]]));
     } else if (k.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
       // พิมพ์ตัวอักษรทับได้เลยแบบสเปรดชีต ไม่ต้องดับเบิลคลิกก่อน
       e.preventDefault();
@@ -786,12 +844,13 @@ const Grid = memo(function Grid({
               }}
               onMouseDown={(e) => {
                 // คลิกพื้นที่ว่างขวาสุดของแถว (เลยคอลัมน์สุดท้าย) ให้เลือกแถวได้เหมือนกัน
-                if (e.button === 0 && e.target === e.currentTarget) pick(vi.index, e);
+                if (e.button === 0 && e.target === e.currentTarget) pick(vi.index, 0, e);
               }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 if (!sel.has(ri)) {
-                  anchor.current = vi.index;
+                  setMark({ r: vi.index, c: 0 });
+                  setCur({ r: vi.index, c: 0 });
                   setSel(new Set([ri]));
                   onSelect([ri]);
                 }
@@ -801,10 +860,19 @@ const Grid = memo(function Grid({
               {res.columns.map((c, ci) => {
                 const here = cur?.r === vi.index && cur.c === ci;
                 if (here && editing) return editBox(c);
+                const inR =
+                  manyCells &&
+                  rect !== null &&
+                  vi.index >= rect.r1 &&
+                  vi.index <= rect.r2 &&
+                  ci >= rect.c1 &&
+                  ci <= rect.c2;
                 return (
                   <div
                     key={c}
-                    className={cellClass(row[c]) + (here ? " picked" : "")}
+                    className={
+                      cellClass(row[c]) + (here ? " picked" : "") + (inR ? " inrange" : "")
+                    }
                     title={
                       editable
                         ? `${cellText(row[c])}
@@ -814,9 +882,15 @@ const Grid = memo(function Grid({
                     }
                     onMouseDown={(e) => {
                       if (e.button !== 0) return;
-                      setCur({ r: vi.index, c: ci });
-                      pick(vi.index, e);
+                      // กัน browser ไฮไลต์ตัวหนังสือระหว่างลาก แล้วโฟกัสเองเพื่อให้คีย์บอร์ดยังทำงาน
+                      e.preventDefault();
+                      parent.current?.focus();
+                      dragging.current = true;
+                      pick(vi.index, ci, e);
                     }}
+                    // ponytail: ลากได้เฉพาะแถวที่ render อยู่ ไม่ auto-scroll ตอนลากพ้นขอบ
+                    // ต้องคลุมไกลกว่านั้นให้เลื่อนแล้ว shift+click ปลายทางแทน
+                    onMouseEnter={() => dragging.current && extendTo(vi.index, ci)}
                     onDoubleClick={() =>
                       editable ? startEdit(vi.index, ci) : onCopy(cellText(row[c]))
                     }
@@ -828,6 +902,17 @@ const Grid = memo(function Grid({
             </div>
           );
         })}
+        {manyCells && (
+          <div
+            className="rangebox"
+            style={{
+              left: widths.slice(0, rect!.c1).reduce((a, b) => a + b, 0),
+              width: widths.slice(rect!.c1, rect!.c2 + 1).reduce((a, b) => a + b, 0),
+              top: rect!.r1 * ROW_H,
+              height: (rect!.r2 - rect!.r1 + 1) * ROW_H,
+            }}
+          />
+        )}
       </div>
 
       {menu && (
@@ -841,6 +926,12 @@ const Grid = memo(function Grid({
             }}
           />
           <div className="ctxmenu" style={{ left: menu.x, top: menu.y }}>
+            {manyCells && (
+              <button onClick={() => (onCopy(rectTsv()), setMenu(null))}>
+                <Copy size={14} weight="duotone" /> Copy selection (
+                {rect!.r2 - rect!.r1 + 1}×{rect!.c2 - rect!.c1 + 1})
+              </button>
+            )}
             <button onClick={() => (onCopy(asTsv(picked())), setMenu(null))}>
               <Copy size={14} weight="duotone" /> Copy {sel.size > 1 ? `${sel.size} rows` : "row"}
             </button>
