@@ -704,6 +704,26 @@ async fn update_cell(
 
 /// ห่อเป็น subquery เพื่อตัดจำนวนแถวฝั่ง server ได้ไหม
 /// (show / explain / คำสั่งเขียน ห่อไม่ได้ ต้องส่งดิบ)
+/// คำสั่งระดับตารางที่ทำลายข้อมูล — รับได้เฉพาะ op ในชุดนี้เท่านั้น ไม่รับ SQL อิสระ
+/// ชื่อตารางมาจาก list_tables ที่ quote มาแล้ว ฝั่ง UI บังคับพิมพ์ชื่อยืนยันอีกชั้น
+#[tauri::command]
+async fn table_op(op: String, table: String, conn: String,
+    state: tauri::State<'_, AppState>) -> R<u64> {
+    let sql = op_sql(&op, &table)?;
+    let p = pool(&state, &conn).await?;
+    Ok(p.execute(sql.as_str()).await.map_err(err)?.rows_affected())
+}
+
+fn op_sql(op: &str, table: &str) -> R<String> {
+    Ok(match op {
+        "truncate" => format!("TRUNCATE TABLE {}", table),
+        "drop" => format!("DROP TABLE {}", table),
+        "drop_cascade" => format!("DROP TABLE {} CASCADE", table),
+        "drop_view" => format!("DROP VIEW {}", table),
+        _ => return Err(format!("ไม่รู้จักคำสั่ง {}", op)),
+    })
+}
+
 fn wrappable(sql: &str) -> bool {
     let head = sql
         .lines()
@@ -1234,6 +1254,7 @@ pub fn run() {
             update_cell,
             insert_row,
             delete_row,
+            table_op,
             run_query,
             export_csv,
             export_sql,
@@ -1259,6 +1280,16 @@ mod tests {
         assert!(!wrappable("insert into t values (1)"));
         assert!(!wrappable("create table t (id int)"));
         assert!(!wrappable("explain select 1"));
+    }
+
+    #[test]
+    fn table_op_is_a_closed_set() {
+        assert_eq!(op_sql("truncate", "\"s\".\"t\"").unwrap(), "TRUNCATE TABLE \"s\".\"t\"");
+        assert_eq!(op_sql("drop_cascade", "t").unwrap(), "DROP TABLE t CASCADE");
+        assert_eq!(op_sql("drop_view", "v").unwrap(), "DROP VIEW v");
+        // op ที่ไม่รู้จักต้องไม่หลุดเป็น SQL — กันไม่ให้ UI ส่งคำสั่งอิสระเข้ามา
+        assert!(op_sql("drop database markdb", "t").is_err());
+        assert!(op_sql("", "t").is_err());
     }
 
     #[test]

@@ -34,6 +34,9 @@ import {
   MagnifyingGlass,
   PencilSimple,
   Info,
+  Copy as CopyIcon,
+  Eraser,
+  ClipboardText,
   Play,
   Plug,
   Plus,
@@ -790,6 +793,14 @@ export default function App() {
   const [stage, setStage] = useState("");
   const [erOpen, setErOpen] = useState(false);
   const [tblMenu, setTblMenu] = useState<{ x: number; y: number; t: TableInfo } | null>(null);
+  // คำสั่งที่ลบของจริง — ต้องพิมพ์ชื่อตารางยืนยันก่อนปุ่มถึงจะกดได้
+  const [danger, setDanger] = useState<{
+    t: TableInfo;
+    op: "truncate" | "drop";
+    rows: number | null;
+  } | null>(null);
+  const [typed, setTyped] = useState("");
+  const [cascade, setCascade] = useState(false);
   const [edges, setEdges] = useState<Edge[] | null>(null);
   const [addRow, setAddRow] = useState<{ cols: ColumnInfo[]; vals: Record<string, string> } | null>(
     null,
@@ -998,6 +1009,70 @@ export default function App() {
       say(String(e));
     }
   }, [addRow, tab, target, run, say]);
+
+  const copy = useCallback(
+    (txt: string, what: string) => {
+      navigator.clipboard?.writeText(txt);
+      say(`คัดลอก${what}แล้ว`);
+    },
+    [say],
+  );
+
+  /* สร้าง CREATE TABLE จาก table_props ที่มีอยู่แล้ว — ไม่ต้องเพิ่มคำสั่งฝั่ง Rust */
+  const copyDdl = useCallback(
+    async (t: TableInfo) => {
+      try {
+        const d = await invoke<TableProps>("table_props", { conn: activeConn, table: qname(t) });
+        const defs = d.columns.map(
+          (c) =>
+            `  "${c.name}" ${c.data_type}` +
+            (c.default ? ` DEFAULT ${c.default}` : "") +
+            (c.nullable ? "" : " NOT NULL"),
+        );
+        const pk = d.columns.filter((c) => c.pk).map((c) => `"${c.name}"`);
+        if (pk.length) defs.push(`  PRIMARY KEY (${pk.join(", ")})`);
+        copy(`CREATE TABLE ${qname(t)} (\n${defs.join(",\n")}\n);`, " CREATE TABLE");
+      } catch (e) {
+        say(String(e));
+      }
+    },
+    [activeConn, copy, say],
+  );
+
+  /* เปิดกล่องยืนยัน แล้วค่อยไปถามจำนวนแถวมาโชว์ว่ากำลังจะลบอะไรไปเท่าไหร่ */
+  const askDanger = useCallback(
+    async (t: TableInfo, op: "truncate" | "drop") => {
+      setTyped("");
+      setCascade(false);
+      setDanger({ t, op, rows: null });
+      try {
+        const d = await invoke<TableProps>("table_props", { conn: activeConn, table: qname(t) });
+        setDanger((x) => (x && x.t === t ? { ...x, rows: d.approx_rows } : x));
+      } catch {
+        /* ไม่ได้ก็ไม่เป็นไร แค่ไม่โชว์จำนวนแถว */
+      }
+    },
+    [activeConn],
+  );
+
+  const runDanger = useCallback(async () => {
+    if (!danger) return;
+    const { t, op } = danger;
+    const isView = t.kind === "view";
+    const cmd = op === "truncate" ? "truncate" : isView ? "drop_view" : cascade ? "drop_cascade" : "drop";
+    setDanger(null);
+    setBusy(true);
+    try {
+      await invoke("table_op", { conn: activeConn, table: qname(t), op: cmd });
+      say(op === "truncate" ? `ล้างข้อมูลใน ${t.name} แล้ว` : `ลบ ${t.name} แล้ว`);
+      if (op === "drop" && picked?.name === t.name && picked.schema === t.schema) setPicked(null);
+      await refresh();
+    } catch (e) {
+      say(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [danger, cascade, activeConn, picked, refresh, say]);
 
   const openEr = useCallback(async () => {
     setErOpen(true);
@@ -1884,8 +1959,97 @@ export default function App() {
             <button onClick={() => (openEr(), setTblMenu(null))}>
               <TreeStructure size={14} weight="duotone" /> ER diagram
             </button>
+
+            <div className="ctxsep" />
+            <button onClick={() => (copy(qname(tblMenu.t), "ชื่อตาราง"), setTblMenu(null))}>
+              <CopyIcon size={14} weight="duotone" /> Copy name
+            </button>
+            <button onClick={() => (copyDdl(tblMenu.t), setTblMenu(null))}>
+              <ClipboardText size={14} weight="duotone" /> Copy CREATE TABLE
+            </button>
+
+            <div className="ctxsep" />
+            {tblMenu.t.kind === "table" && (
+              <button
+                className="bad"
+                onClick={() => (askDanger(tblMenu.t, "truncate"), setTblMenu(null))}
+              >
+                <Eraser size={14} weight="duotone" /> Truncate — ล้างข้อมูลทั้งตาราง…
+              </button>
+            )}
+            <button className="bad" onClick={() => (askDanger(tblMenu.t, "drop"), setTblMenu(null))}>
+              <Trash size={14} weight="duotone" /> Drop {tblMenu.t.kind === "view" ? "view" : "table"}…
+            </button>
           </div>
         </>
+      )}
+
+      {danger && (
+        <div className="overlay" onClick={() => setDanger(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>
+              {danger.op === "truncate" ? (
+                <Eraser size={17} weight="duotone" />
+              ) : (
+                <Trash size={17} weight="duotone" />
+              )}
+              {danger.op === "truncate"
+                ? "ล้างข้อมูลทั้งตาราง?"
+                : `ลบ${danger.t.kind === "view" ? " view" : "ตาราง"}ทิ้ง?`}
+            </h3>
+            <p>
+              {danger.op === "truncate"
+                ? "ทุกแถวในตารางจะหายหมด โครงสร้างตารางยังอยู่ — กู้คืนไม่ได้"
+                : "ทั้งโครงสร้างและข้อมูลจะหายหมด — กู้คืนไม่ได้"}
+            </p>
+            <div className="warn">
+              <div>
+                <b>
+                  {danger.t.schema}.{danger.t.name}
+                </b>
+              </div>
+              <div className="path">
+                {danger.rows === null
+                  ? "กำลังนับแถว…"
+                  : `~${danger.rows.toLocaleString()} แถว (ประมาณจาก ANALYZE ล่าสุด)`}
+              </div>
+            </div>
+            {danger.op === "drop" && danger.t.kind === "table" && (
+              <label className="chk">
+                <input
+                  type="checkbox"
+                  checked={cascade}
+                  onChange={(e) => setCascade(e.target.checked)}
+                />
+                <span>
+                  CASCADE — ลบ view / foreign key ของตารางอื่นที่ชี้มาที่นี่ไปด้วย
+                </span>
+              </label>
+            )}
+            <p style={{ marginBottom: 6 }}>
+              พิมพ์ <b>{danger.t.name}</b> เพื่อยืนยัน
+            </p>
+            <input
+              autoFocus
+              value={typed}
+              placeholder={danger.t.name}
+              onChange={(e) => setTyped(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && typed === danger.t.name && runDanger()}
+            />
+            <div className="modal-foot">
+              <button className="btn sm" onClick={() => setDanger(null)}>
+                ยกเลิก
+              </button>
+              <button
+                className="btn primary sm danger"
+                disabled={typed !== danger.t.name}
+                onClick={runDanger}
+              >
+                {danger.op === "truncate" ? "ล้างข้อมูล" : "ลบทิ้ง"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {erOpen && (
