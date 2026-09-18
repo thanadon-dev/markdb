@@ -86,3 +86,5 @@ GitHub Actions จะ build → เซ็น → สร้าง Release พร�
 - backup ไม่ครอบคลุม trigger · function · extension · GRANT · partition
 - Redshift: ยัง backup ทั้ง database ไม่ได้ และ import CSV ใช้ INSERT แทน `COPY`
 - Windows x64 เท่านั้น
+
+<!-- smoke test -->
