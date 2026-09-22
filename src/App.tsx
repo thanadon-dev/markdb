@@ -5,7 +5,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
-import { stmtAt, targetTable } from "./sqlsplit";
+import { stmtAt, stmtRangeAt, targetTable } from "./sqlsplit";
 import { PostgreSQL, sql as sqlLang } from "@codemirror/lang-sql";
 import { createTheme } from "@uiw/codemirror-themes";
 import { tags as t } from "@lezer/highlight";
@@ -15,7 +15,14 @@ import {
   completionKeymap,
   type CompletionContext,
 } from "@codemirror/autocomplete";
-import { keymap } from "@codemirror/view";
+import {
+  Decoration,
+  type DecorationSet,
+  EditorView,
+  ViewPlugin,
+  type ViewUpdate,
+  keymap,
+} from "@codemirror/view";
 import { Prec } from "@codemirror/state";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -285,6 +292,39 @@ const cellClass = (v: unknown) =>
       : typeof v === "boolean"
         ? "cell bool"
         : "cell";
+
+/* ระบายบรรทัดของ statement ที่เคอร์เซอร์ยืนอยู่ ให้เห็นว่า Ctrl+Enter จะรันก้อนไหน
+   ponytail: คำนวณใหม่ทุกครั้งที่ขยับเคอร์เซอร์ — query ในแท็บสั้น ไม่ต้อง cache */
+const stmtLine = Decoration.line({ class: "cm-stmt" });
+
+const stmtMarks = (view: EditorView) => {
+  const st = view.state;
+  const cur = st.selection.main;
+  // ลากคลุมเอง = รันตามที่คลุม ไม่ต้องไฮไลต์ให้สับสน
+  if (!cur.empty) return Decoration.none;
+  const { from, to } = stmtRangeAt(st.doc.toString(), cur.head);
+  if (from >= to) return Decoration.none;
+  const out = [];
+  for (let p = from; p <= to; ) {
+    const line = st.doc.lineAt(p);
+    out.push(stmtLine.range(line.from));
+    p = line.to + 1;
+  }
+  return Decoration.set(out);
+};
+
+const stmtHighlight = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet;
+    constructor(view: EditorView) {
+      this.decorations = stmtMarks(view);
+    }
+    update(u: ViewUpdate) {
+      if (u.docChanged || u.selectionSet) this.decorations = stmtMarks(u.view);
+    }
+  },
+  { decorations: (v) => v.decorations },
+);
 
 const blackTheme = createTheme({
   theme: "dark",
@@ -1620,6 +1660,7 @@ export default function App() {
 
     return [
       support,
+      stmtHighlight,
       support.language.data.of({ autocomplete: values }),
       autocompletion({ defaultKeymap: false }),
       // ต้องแย่ง Ctrl+Enter จาก keymap ของ CodeMirror ไม่งั้นมันแทรกบรรทัดใหม่ก่อนแล้วค่อยรัน
