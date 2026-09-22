@@ -33,6 +33,34 @@ test("ไม่มี ; เลย = ทั้งก้อน", () => {
   assert.equal(at("select * from t", "from"), "select * from t");
 });
 
+test("บรรทัดว่างคั่น = คนละคำสั่ง ถึงจะไม่มี ;", () => {
+  const doc = "select 1\n\nselect 2";
+  assert.equal(at(doc, "1"), "select 1");
+  assert.equal(at(doc, "2"), "select 2");
+});
+
+test("ตามภาพ: ; แล้วเว้นสองบรรทัด แล้วคำสั่งที่ไม่มี ;", () => {
+  const q1 = 'select *\nfrom "public"."t"\nlimit 500;';
+  const q2 = `select *\nfrom "public"."t"\nwhere id = 'x'`;
+  const doc = q1 + "\n\n\n" + q2;
+  assert.equal(at(doc, "limit"), q1.slice(0, -1));
+  assert.equal(at(doc, "where"), q2);
+  // เคอร์เซอร์ต่อท้ายบรรทัดสุดท้ายของแต่ละก้อน
+  assert.equal(stmtAt(doc, q1.length).trim(), q1.slice(0, -1));
+  assert.equal(stmtAt(doc, doc.length).trim(), q2);
+});
+
+test("บรรทัดว่างที่มีแต่ space/tab ก็นับเป็นตัวคั่น", () => {
+  assert.equal(at("select 1\n \t\nselect 2", "2"), "select 2");
+  // เว้นหลายบรรทัดติดกัน ไม่ทำให้เกิดคำสั่งว่าง
+  assert.equal(at("select 1\n\n\n\nselect 2", "2"), "select 2");
+});
+
+test("ขึ้นบรรทัดใหม่เฉย ๆ ไม่ตัด", () => {
+  const doc = "select *\nfrom t\nwhere a = 1";
+  assert.equal(at(doc, "where"), doc);
+});
+
 const tt = (sql: string) => {
   const t = targetTable(sql);
   return t ? (t.schema ? `${t.schema}.${t.name}` : t.name) : null;

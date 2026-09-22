@@ -1,7 +1,14 @@
-/* หา statement ที่เคอร์เซอร์อยู่ — ตัดด้วย ; แต่ข้าม ; ที่อยู่ใน string หรือ comment
+/* ซอย doc เป็น statement — ตัดด้วย ; และด้วยบรรทัดว่าง (เคาะ Enter คั่นไว้ 1 บรรทัด)
+   ข้าม ; ที่อยู่ใน string หรือ comment
+   to = ตำแหน่งท้ายสุดที่ยังนับว่าเคอร์เซอร์อยู่ใน statement นี้ (รวมตัวคั่นด้วย)
    ponytail: ไม่รองรับ dollar-quote ($$...$$) — เจอเคสนั้นค่อยลากคลุมเอา */
-export const stmtAt = (doc: string, pos: number) => {
+const split = (doc: string) => {
+  const out: { text: string; to: number }[] = [];
   let start = 0;
+  const push = (end: number, next: number) => {
+    if (doc.slice(start, end).trim()) out.push({ text: doc.slice(start, end), to: next });
+    start = next;
+  };
   for (let i = 0; i < doc.length; i++) {
     const c = doc[i];
     if (c === "'" || c === '"') {
@@ -27,11 +34,26 @@ export const stmtAt = (doc: string, pos: number) => {
       continue;
     }
     if (c === ";") {
-      if (i >= pos) return doc.slice(start, i);
-      start = i + 1;
+      push(i, i + 1); // ตัว ; ไม่ต้องส่งไปด้วย แต่เคอร์เซอร์ที่ยืนหลัง ; ยังนับเป็นคำสั่งนี้
+      continue;
+    }
+    if (c === "\n") {
+      let j = i + 1;
+      while (j < doc.length && (doc[j] === " " || doc[j] === "\t" || doc[j] === "\r")) j++;
+      if (doc[j] === "\n") {
+        push(i, j + 1); // มีบรรทัดว่างคั่น = คนละคำสั่ง ถึงจะไม่มี ; ก็ตาม
+        i = j;
+      }
     }
   }
-  return doc.slice(start);
+  push(doc.length, doc.length);
+  return out;
+};
+
+/* statement ที่เคอร์เซอร์ยืนอยู่ — ยืนหลังบรรทัดสุดท้ายของก้อนไหน ก็ได้ก้อนนั้น */
+export const stmtAt = (doc: string, pos: number) => {
+  const segs = split(doc);
+  return (segs.find((s) => pos <= s.to) ?? segs[segs.length - 1])?.text ?? doc;
 };
 
 /* ตารางที่ผลลัพธ์ของ query นี้เขียนกลับไปได้ — ต้องเป็น select จากตารางเดียวจริง ๆ
