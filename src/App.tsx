@@ -1414,11 +1414,16 @@ export default function App() {
     const keys = pkKeys(confirmDel);
     setConfirmDel(null);
     try {
-      await invoke("delete_row", { conn: tab.conn, table: target, keys });
-      // เก็บทุกคอลัมน์ที่ผลลัพธ์นี้มี — เท่ากับที่ insert กลับเข้าไปได้ตอนกดย้อน
+      // delete_row คืนทั้งแถวที่ลบไป (ทุกคอลัมน์ในตาราง) มาให้เก็บลงประวัติ
+      // อ่านไม่ได้ค่อยถอยไปใช้เท่าที่ผลลัพธ์บนจอมี
+      const full = await invoke<Record<string, unknown> | null>("delete_row", {
+        conn: tab.conn,
+        table: target,
+        keys,
+      });
       const row: Record<string, hist.Val> = {};
-      for (const c of tab.res?.columns ?? []) row[c] = asVal(confirmDel[c]);
-      logIt({ kind: "delete", table: target, row, keys }, tab.conn);
+      for (const [c, v] of Object.entries(full ?? confirmDel)) row[c] = asVal(v);
+      logIt({ kind: "delete", table: target, row, keys, partial: !full }, tab.conn);
       say("ลบแถวแล้ว");
       setSelRows([]);
       run(tab.id, tab.sql);
@@ -2516,6 +2521,10 @@ export default function App() {
                           <div className="diff">
                             <div className="drow ok">
                               <span className="dlab">แถวที่จะใส่กลับเข้าไป</span>
+                              <span className="dval">
+                                {Object.keys(e.row).length} คอลัมน์
+                                {e.partial ? " (เท่าที่ผลลัพธ์บนจอมี)" : " — ครบทั้งตาราง"}
+                              </span>
                             </div>
                             <div className="hrow">
                               {Object.entries(e.row).map(([c, v]) => (
