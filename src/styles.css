@@ -1530,3 +1530,9 @@ select:focus {
   border: 1.5px solid #4a8cff;
   border-radius: 3px;
 }
+
+/* statement ที่เคอร์เซอร์ยืนอยู่ = ก้อนที่ Ctrl+Enter จะรัน */
+.cm-editor .cm-line.cm-stmt {
+  background: #0d1725;
+  box-shadow: inset 2px 0 0 #2f5d9e;
+}

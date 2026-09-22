@@ -3,10 +3,15 @@
    to = ตำแหน่งท้ายสุดที่ยังนับว่าเคอร์เซอร์อยู่ใน statement นี้ (รวมตัวคั่นด้วย)
    ponytail: ไม่รองรับ dollar-quote ($$...$$) — เจอเคสนั้นค่อยลากคลุมเอา */
 const split = (doc: string) => {
-  const out: { text: string; to: number }[] = [];
+  const out: { from: number; end: number; bound: number }[] = [];
   let start = 0;
+  // ตัดหัวท้ายที่เป็นช่องว่างออกตั้งแต่ตอนซอย ตำแหน่งที่ได้จะเอาไปไฮไลต์ได้ตรง ๆ
   const push = (end: number, next: number) => {
-    if (doc.slice(start, end).trim()) out.push({ text: doc.slice(start, end), to: next });
+    let a = start;
+    let b = end;
+    while (a < b && /\s/.test(doc[a])) a++;
+    while (b > a && /\s/.test(doc[b - 1])) b--;
+    if (a < b) out.push({ from: a, end: b, bound: next });
     start = next;
   };
   for (let i = 0; i < doc.length; i++) {
@@ -50,10 +55,16 @@ const split = (doc: string) => {
   return out;
 };
 
-/* statement ที่เคอร์เซอร์ยืนอยู่ — ยืนหลังบรรทัดสุดท้ายของก้อนไหน ก็ได้ก้อนนั้น */
-export const stmtAt = (doc: string, pos: number) => {
+/* ช่วงของ statement ที่เคอร์เซอร์ยืนอยู่ — ยืนหลังบรรทัดสุดท้ายของก้อนไหน ก็ได้ก้อนนั้น */
+export const stmtRangeAt = (doc: string, pos: number) => {
   const segs = split(doc);
-  return (segs.find((s) => pos <= s.to) ?? segs[segs.length - 1])?.text ?? doc;
+  const hit = segs.find((s) => pos <= s.bound) ?? segs[segs.length - 1];
+  return hit ? { from: hit.from, to: hit.end } : { from: 0, to: 0 };
+};
+
+export const stmtAt = (doc: string, pos: number) => {
+  const { from, to } = stmtRangeAt(doc, pos);
+  return doc.slice(from, to);
 };
 
 /* ตารางที่ผลลัพธ์ของ query นี้เขียนกลับไปได้ — ต้องเป็น select จากตารางเดียวจริง ๆ
