@@ -622,13 +622,15 @@ async fn insert_row(
 }
 
 /// ลบแถวผ่าน primary key — เงื่อนไขต้องตรงพอดี 1 แถว ไม่งั้น rollback
+/// คืนค่าทั้งแถวที่ลบไป (ทุกคอลัมน์ในตาราง ไม่ใช่เฉพาะที่ query บนจอ select มา)
+/// ให้ฝั่ง UI เก็บลงประวัติไว้ insert กลับได้ครบ
 #[tauri::command]
 async fn delete_row(
     table: String,
     keys: Vec<KeyVal>,
     conn: String,
     state: tauri::State<'_, AppState>,
-) -> R<u64> {
+) -> R<Option<serde_json::Value>> {
     if keys.is_empty() {
         return Err("ตารางนี้ไม่มี primary key จึงลบแถวตรง ๆ ไม่ได้".into());
     }
@@ -644,6 +646,16 @@ async fn delete_row(
     let sql = format!("delete from {} where {}", table, where_sql);
 
     let mut tx = p.begin().await.map_err(err)?;
+    // อ่านทั้งแถวไว้ก่อน ใน transaction เดียวกับที่ลบ — ไม่มีช่องว่างให้แถวเปลี่ยน
+    // ระหว่างอ่านกับลบ และไม่ใช้ DELETE ... RETURNING เพราะ Redshift ไม่รองรับ
+    let before = match sqlx::query(&format!("select * from {} where {}", table, where_sql))
+        .fetch_optional(&mut *tx)
+        .await
+    {
+        Ok(Some(r)) => Some(row_json(&r)?),
+        // อ่านไม่ได้ก็ยังลบต่อ แค่ประวัติจะเก็บได้ไม่ครบ (ฝั่ง UI ถอยไปใช้ค่าบนจอแทน)
+        _ => None,
+    };
     let n = sqlx::query(&sql)
         .execute(&mut *tx)
         .await
@@ -654,7 +666,7 @@ async fn delete_row(
         return Err(format!("เงื่อนไขตรง {} แถว (ต้องเป็น 1) — ยกเลิกการลบ", n));
     }
     tx.commit().await.map_err(err)?;
-    Ok(n)
+    Ok(before)
 }
 
 /// แก้ค่า cell เดียวผ่าน primary key — รันใน transaction แล้วยืนยันว่าโดนแค่ 1 แถว
@@ -753,6 +765,17 @@ fn cell_json(row: &sqlx::postgres::PgRow, i: usize) -> R<serde_json::Value> {
         "BOOL" => serde_json::Value::Bool(text == "t" || text == "true"),
         _ => serde_json::Value::String(text),
     })
+}
+
+/// ทั้งแถวเป็น JSON object เรียงตามลำดับคอลัมน์จริงในตาราง
+fn row_json(row: &sqlx::postgres::PgRow) -> R<serde_json::Value> {
+    let mut cols: Vec<String> = row.columns().iter().map(|c| c.name().to_string()).collect();
+    dedupe(&mut cols);
+    let mut obj = serde_json::Map::with_capacity(cols.len());
+    for (i, c) in cols.iter().enumerate() {
+        obj.insert(c.clone(), cell_json(row, i)?);
+    }
+    Ok(serde_json::Value::Object(obj))
 }
 
 #[tauri::command]
