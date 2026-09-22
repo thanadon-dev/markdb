@@ -6,6 +6,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { stmtAt, stmtRangeAt, targetTable } from "./sqlsplit";
+import * as hist from "./history";
 import { PostgreSQL, sql as sqlLang } from "@codemirror/lang-sql";
 import { createTheme } from "@uiw/codemirror-themes";
 import { tags as t } from "@lezer/highlight";
@@ -47,6 +48,7 @@ import {
   Copy as CopyIcon,
   Eraser,
   ClipboardText,
+  ClockCounterClockwise,
   Play,
   Plug,
   Plus,
@@ -325,6 +327,16 @@ const stmtHighlight = ViewPlugin.fromClass(
   },
   { decorations: (v) => v.decorations },
 );
+
+const KIND: Record<hist.Entry["kind"], string> = {
+  update: "UPDATE",
+  delete: "DELETE",
+  truncate: "TRUNCATE",
+  drop: "DROP",
+};
+
+const when = (t: number) =>
+  new Date(t).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "medium" });
 
 const blackTheme = createTheme({
   theme: "dark",
@@ -1017,6 +1029,11 @@ export default function App() {
   const [rels, setRels] = useState<Release[] | null>(null);
   const [relErr, setRelErr] = useState("");
   const [gridFilter, setGridFilter] = useState("");
+  // ประวัติคำสั่งที่เปลี่ยนข้อมูล — อยู่ในเครื่องนี้เท่านั้น ไม่ได้เขียนอะไรลง db
+  const [log, setLog] = useState<hist.Entry[]>(hist.load);
+  const [logOpen, setLogOpen] = useState(false);
+  const [logSel, setLogSel] = useState<string | null>(null);
+  const [clearArm, setClearArm] = useState(false);
   const [mode, setMode] = useState<"grid" | "record">("grid");
   const [selRows, setSelRows] = useState<number[]>([]);
   const [confirmDel, setConfirmDel] = useState<Record<string, unknown> | null>(null);
@@ -1120,6 +1137,7 @@ export default function App() {
     const onEsc = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       if (tblMenu) return setTblMenu(null);
+      if (logOpen) return setLogOpen(false);
       if (danger) return setDanger(null);
       if (addRow) return setAddRow(null);
       if (confirmDel) return setConfirmDel(null);
@@ -1132,7 +1150,9 @@ export default function App() {
     };
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
-  }, [tblMenu, danger, addRow, confirmDel, restoreFile, props, exportOpen, erOpen, form, updatesOpen, pct]);
+  }, [tblMenu, logOpen, danger, addRow, confirmDel, restoreFile, props, exportOpen, erOpen, form, updatesOpen, pct]);
+
+  useEffect(() => hist.save(log), [log]);
 
   const patch = useCallback(
     (id: string, p: Partial<Tab>) =>
@@ -1289,6 +1309,24 @@ export default function App() {
     [activeConn, copy, say],
   );
 
+  const logIt = useCallback(
+    (e: Omit<hist.Entry, "id" | "at" | "conn" | "connName">, conn: string) =>
+      setLog((l) =>
+        hist.add(l, {
+          ...e,
+          id: uid(),
+          at: Date.now(),
+          conn,
+          connName: conns.find((c) => c.id === conn)?.name ?? conn,
+        }),
+      ),
+    [conns],
+  );
+
+  /* ค่าที่หน้าจอถืออยู่ → ข้อความที่ส่งกลับเข้า db ได้ (null ต้องคงเป็น null ไม่ใช่ "null") */
+  const asVal = (v: unknown): hist.Val =>
+    v === null || v === undefined ? null : cellText(v);
+
   /* เปิดกล่องยืนยัน แล้วค่อยไปถามจำนวนแถวมาโชว์ว่ากำลังจะลบอะไรไปเท่าไหร่ */
   const askDanger = useCallback(
     async (t: TableInfo, op: "truncate" | "drop") => {
@@ -1314,6 +1352,7 @@ export default function App() {
     setBusy(true);
     try {
       await invoke("table_op", { conn: activeConn, table: qname(t), op: cmd });
+      logIt({ kind: op === "truncate" ? "truncate" : "drop", table: qname(t) }, activeConn);
       say(op === "truncate" ? `ล้างข้อมูลใน ${t.name} แล้ว` : `ลบ ${t.name} แล้ว`);
       if (op === "drop" && picked?.name === t.name && picked.schema === t.schema) setPicked(null);
       await refresh();
@@ -1322,7 +1361,33 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }, [danger, cascade, activeConn, picked, refresh, say]);
+  }, [danger, cascade, activeConn, picked, refresh, say, logIt]);
+
+  /* ย้อนกลับ = ยิงคำสั่งตรงข้ามผ่าน command เดิม จึงยังโดนด่านนับแถว (ต้องโดน 1 แถว)
+     เหมือนการแก้ปกติ ถ้าแถวนั้นถูกคนอื่นแก้ไปแล้วจะ error แทนที่จะเขียนทับมั่ว */
+  const revert = useCallback(
+    async (e: hist.Entry) => {
+      const plan = hist.revertPlan(e);
+      if ("reason" in plan) return say(plan.reason);
+      setBusy(true);
+      try {
+        await invoke(plan.cmd, { conn: e.conn, ...plan.args });
+        const back = hist.reverseOf(e, uid(), Date.now());
+        setLog((l) => {
+          const marked = l.map((x) => (x.id === e.id ? { ...x, undone: true } : x));
+          return back ? hist.add(marked, back) : marked;
+        });
+        setLogSel(null);
+        say("ย้อนกลับแล้ว");
+        if (tab && tab.conn === e.conn && tab.sql) run(tab.id, tab.sql);
+      } catch (err) {
+        say(String(err));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [tab, run, say],
+  );
 
   const openEr = useCallback(async () => {
     setErOpen(true);
@@ -1350,21 +1415,27 @@ export default function App() {
     setConfirmDel(null);
     try {
       await invoke("delete_row", { conn: tab.conn, table: target, keys });
+      // เก็บทุกคอลัมน์ที่ผลลัพธ์นี้มี — เท่ากับที่ insert กลับเข้าไปได้ตอนกดย้อน
+      const row: Record<string, hist.Val> = {};
+      for (const c of tab.res?.columns ?? []) row[c] = asVal(confirmDel[c]);
+      logIt({ kind: "delete", table: target, row, keys }, tab.conn);
       say("ลบแถวแล้ว");
       setSelRows([]);
       run(tab.id, tab.sql);
     } catch (e) {
       say(String(e));
     }
-  }, [confirmDel, tab, target, pkKeys, run, say]);
+  }, [confirmDel, tab, target, pkKeys, run, say, logIt]);
 
   const editCell = useCallback(
     async (rowIndex: number, column: string, value: string | null) => {
       if (!tab?.res || !target || !rowKey?.length) return;
       const row = tab.res.rows[rowIndex];
       const keys = pkKeys(row);
+      const before = asVal(row[column]);
       try {
         await invoke("update_cell", { conn: tab.conn, table: target, column, value, keys });
+        logIt({ kind: "update", table: target, column, before, after: value, keys }, tab.conn);
         const rows = tab.res.rows.slice();
         rows[rowIndex] = { ...row, [column]: value };
         patch(tab.id, { res: { ...tab.res, rows } });
@@ -1373,7 +1444,7 @@ export default function App() {
         say(String(e));
       }
     },
-    [tab, target, rowKey, patch, pkKeys, say],
+    [tab, target, rowKey, patch, pkKeys, say, logIt],
   );
 
   const addTab = useCallback(() => {
@@ -1818,6 +1889,20 @@ export default function App() {
           </button>
           <button className="btn sm" onClick={() => setExportOpen(true)} disabled={!tab?.res}>
             <DownloadSimple size={15} weight="duotone" /> Export
+          </button>
+          <button
+            className="btn sm"
+            onClick={() => {
+              setClearArm(false);
+              setLogSel(null);
+              setLogOpen(true);
+            }}
+            title="ประวัติการแก้ไข / ลบ ที่ทำจากเครื่องนี้"
+          >
+            <ClockCounterClockwise size={15} weight="duotone" /> History
+            {log.some((e) => !e.undone && e.kind !== "drop" && e.kind !== "truncate") && (
+              <em className="dot" />
+            )}
           </button>
           <button
             className="btn sm"
@@ -2349,6 +2434,140 @@ export default function App() {
                   setErOpen(false);
                 }}
               />
+            )}
+          </div>
+        </div>
+      )}
+
+      {logOpen && (
+        <div className="overlay" onClick={() => setLogOpen(false)}>
+          <div className="modal wide" onClick={(e) => e.stopPropagation()}>
+            <Close on={() => setLogOpen(false)} />
+            <h3>
+              <ClockCounterClockwise size={17} weight="duotone" /> ประวัติการแก้ไข
+            </h3>
+            <p>
+              บันทึกเฉพาะคำสั่งที่ทำจากแอปนี้บนเครื่องนี้ เก็บไว้ในเครื่อง ไม่ได้เขียนอะไรลง
+              database · {log.length} รายการ
+            </p>
+
+            {!log.length ? (
+              <div className="warn">
+                <div>ยังไม่มีประวัติ</div>
+                <div className="path">
+                  แก้ค่าในตาราง ลบแถว หรือ truncate/drop แล้วรายการจะมาโผล่ที่นี่
+                </div>
+              </div>
+            ) : (
+              <div className="histwrap">
+                <div className="histlist">
+                  {log.map((e) => (
+                    <button
+                      key={e.id}
+                      className={
+                        "histrow" + (logSel === e.id ? " on" : "") + (e.undone ? " done" : "")
+                      }
+                      onClick={() => setLogSel(e.id)}
+                    >
+                      <span className={"hkind k-" + e.kind}>{KIND[e.kind]}</span>
+                      <span className="ht">
+                        {e.table}
+                        {e.column ? <em>.{e.column}</em> : null}
+                      </span>
+                      <span className="hw">
+                        {e.undone ? "ย้อนแล้ว" : e.isRevert ? "เป็นการย้อน" : when(e.at)}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="histdetail">
+                  {(() => {
+                    const e = log.find((x) => x.id === logSel);
+                    if (!e)
+                      return <div className="hhint">เลือกรายการทางซ้ายเพื่อดูว่าย้อนกลับแล้วจะเป็นแบบไหน</div>;
+                    const plan = hist.revertPlan(e);
+                    return (
+                      <>
+                        <div className="hmeta">
+                          <b>{KIND[e.kind]}</b> {e.table}
+                          <span>
+                            {e.connName} · {when(e.at)}
+                          </span>
+                        </div>
+
+                        {e.kind === "update" && (
+                          <div className="diff">
+                            <div className="drow ok">
+                              <span className="dlab">ย้อนกลับไปเป็น</span>
+                              <span className="dval">{hist.show(e.before)}</span>
+                            </div>
+                            <div className="drow bad">
+                              <span className="dlab">ตอนนี้เป็น</span>
+                              <span className="dval">{hist.show(e.after)}</span>
+                            </div>
+                            <div className="dkeys">
+                              {(e.keys ?? []).map((k) => `${k.column} = ${hist.show(k.value)}`).join("  ·  ")}
+                            </div>
+                          </div>
+                        )}
+
+                        {e.kind === "delete" && e.row && (
+                          <div className="diff">
+                            <div className="drow ok">
+                              <span className="dlab">แถวที่จะใส่กลับเข้าไป</span>
+                            </div>
+                            <div className="hrow">
+                              {Object.entries(e.row).map(([c, v]) => (
+                                <div key={c} className="hcell">
+                                  <span>{c}</span>
+                                  <b className={v === null ? "isnull" : ""}>{hist.show(v)}</b>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {"reason" in plan ? (
+                          <div className="warn">
+                            <div>ย้อนกลับไม่ได้</div>
+                            <div className="path">{plan.reason}</div>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="hsql">{plan.summary}</div>
+                            <button
+                              className="btn primary sm"
+                              disabled={busy}
+                              onClick={() => revert(e)}
+                              title="รันคำสั่งย้อนกลับทันที"
+                            >
+                              <ArrowCounterClockwise size={15} weight="bold" /> ย้อนกลับ
+                            </button>
+                          </>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
+            )}
+
+            {log.length > 0 && (
+              <div className="modal-foot">
+                <button
+                  className={"btn sm" + (clearArm ? " danger" : "")}
+                  onClick={() => {
+                    if (!clearArm) return setClearArm(true);
+                    setLog([]);
+                    setLogSel(null);
+                    setClearArm(false);
+                  }}
+                  title="ลบเฉพาะประวัติในเครื่อง ไม่แตะข้อมูลใน database"
+                >
+                  {clearArm ? "กดอีกครั้งเพื่อล้างประวัติ" : "ล้างประวัติ"}
+                </button>
+              </div>
             )}
           </div>
         </div>
