@@ -96,6 +96,18 @@ type TableProps = {
   size: string;
   relations: Relation[];
 };
+type CsvHead = { columns: string[]; sample: string[][]; rows: number };
+type CsvJob = {
+  path: string;
+  table: TableInfo;
+  head: CsvHead;
+  tcols: ColumnInfo[];
+  mode: "insert" | "update";
+  keys: string[];
+  cols: string[];
+  err?: string;
+  done?: { updated: number; missing: string[] };
+};
 type Release = { tag_name: string; name: string; published_at: string; body: string };
 
 const RELEASES_API = "https://api.github.com/repos/thanadon-dev/markdb/releases?per_page=20";
@@ -413,6 +425,167 @@ const layout = (edges: Edge[]) => {
   const h = Math.max(...nodes.map((n) => n.y + NH), 1) + 40;
   return { nodes, at, w, h };
 };
+
+/* นำเข้า CSV: Insert เป็นแถวใหม่ หรือ Update แถวที่มีอยู่ โดยจับคู่ด้วยคอลัมน์ key */
+function CsvModal({
+  job,
+  set,
+  run,
+  busy,
+}: {
+  job: CsvJob;
+  set: (j: CsvJob | null) => void;
+  run: () => void;
+  busy: boolean;
+}) {
+  const shared = job.tcols.filter((c) => job.head.columns.includes(c.name));
+  const skipped = job.head.columns.filter((h) => !job.tcols.some((c) => c.name === h));
+  const up = job.mode === "update";
+  const show = [...job.keys, ...job.cols];
+  const at = show.map((c) => job.head.columns.indexOf(c));
+  const ready = !up || (job.keys.length > 0 && job.cols.length > 0);
+  // คอลัมน์เดียวเป็นทั้ง key และคอลัมน์ที่แก้พร้อมกันไม่ได้ — ติ๊กฝั่งหนึ่งแล้วเอาออกจากอีกฝั่ง
+  const toggle = (k: "keys" | "cols", name: string) => {
+    const other = k === "keys" ? "cols" : "keys";
+    set({
+      ...job,
+      err: undefined,
+      [k]: job[k].includes(name) ? job[k].filter((x) => x !== name) : [...job[k], name],
+      [other]: job[other].filter((x) => x !== name),
+    });
+  };
+  const close = () => set(null);
+
+  return (
+    <div className="overlay">
+      <div className="modal wide">
+        <Close on={close} />
+        <h3>
+          <UploadSimple size={17} weight="duotone" /> นำเข้า CSV → {job.table.name}
+        </h3>
+        <p className="csvpath">
+          {job.path} · {job.head.rows.toLocaleString()} แถว
+        </p>
+
+        {job.done ? (
+          <>
+            <div className="testres ok">
+              <CheckCircle size={16} weight="fill" />
+              <span>อัปเดตแล้ว {job.done.updated.toLocaleString()} แถว</span>
+            </div>
+            {job.done.missing.length > 0 && (
+              <div className="warn csvmiss">
+                <div>
+                  ไม่เจอ key ในตาราง {job.done.missing.length.toLocaleString()} แถว — ข้ามไป ไม่ได้แก้อะไร
+                </div>
+                <div className="path">{job.done.missing.join(" · ")}</div>
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <div className="seg csvmode">
+              <button className={up ? "" : "on"} onClick={() => set({ ...job, mode: "insert", err: undefined })}>
+                <RowsPlusBottom size={14} weight="duotone" /> เพิ่มแถวใหม่ (Insert)
+              </button>
+              <button className={up ? "on" : ""} onClick={() => set({ ...job, mode: "update", err: undefined })}>
+                <PencilSimple size={14} weight="duotone" /> แก้แถวที่มีอยู่ (Update)
+              </button>
+            </div>
+
+            {up ? (
+              <>
+                <p>
+                  <b>Key</b> = คอลัมน์ที่ใช้หาแถว (ปกติคือ primary key) · <b>แก้</b> = คอลัมน์ที่จะเขียนทับด้วยค่าจากไฟล์
+                  — คอลัมน์ที่ไม่ได้ติ๊กไม่ถูกแตะ
+                </p>
+                <div className="cols">
+                  <div className="csvrow head">
+                    <span>คอลัมน์ที่มีทั้งในไฟล์และในตาราง</span>
+                    <span>Key</span>
+                    <span>แก้</span>
+                  </div>
+                  {shared.map((c) => (
+                    <div className="csvrow" key={c.name}>
+                      <span>
+                        {c.pk && "🔑 "}
+                        {c.name}
+                        <em>{c.data_type}</em>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={job.keys.includes(c.name)}
+                        onChange={() => toggle("keys", c.name)}
+                      />
+                      <input
+                        type="checkbox"
+                        checked={job.cols.includes(c.name)}
+                        onChange={() => toggle("cols", c.name)}
+                      />
+                    </div>
+                  ))}
+                </div>
+                {skipped.length > 0 && <p className="csvskip">ไม่มีในตาราง ข้ามไป: {skipped.join(", ")}</p>}
+                {show.length > 0 && (
+                  <table className="csvprev">
+                    <thead>
+                      <tr>
+                        {show.map((c) => (
+                          <th key={c}>
+                            {job.keys.includes(c) && "🔑 "}
+                            {c}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {job.head.sample.map((r, i) => (
+                        <tr key={i}>
+                          {at.map((j, k) => (
+                            <td key={k}>{r[j] ?? ""}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                <p className="csvnote">
+                  ช่องว่าง / NULL = NULL · ทั้งไฟล์รันใน transaction เดียว — error หรือ key ตรงเกิน 1 แถว
+                  ยกเลิกทั้งหมด ไม่มีอะไรถูกแก้
+                </p>
+              </>
+            ) : (
+              <p>ทุกแถวในไฟล์จะถูก insert เป็นแถวใหม่ ตามชื่อคอลัมน์ในหัวไฟล์</p>
+            )}
+            {job.err && (
+              <div className="testres bad">
+                <WarningCircle size={16} weight="fill" />
+                <span>{job.err}</span>
+              </div>
+            )}
+          </>
+        )}
+
+        <div className="modal-foot">
+          {job.done ? (
+            <button className="btn primary sm" onClick={close}>
+              ปิด
+            </button>
+          ) : (
+            <>
+              <button className="btn sm" onClick={close}>
+                ยกเลิก
+              </button>
+              <button className="btn primary sm" onClick={run} disabled={!ready || busy}>
+                {busy ? "กำลังทำ…" : up ? "อัปเดต" : `นำเข้า ${job.head.rows.toLocaleString()} แถว`}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function ErDiagram({ edges, onOpen }: { edges: Edge[]; onOpen: (t: string) => void }) {
   const { nodes, at, w, h } = useMemo(() => layout(edges), [edges]);
@@ -1020,6 +1193,7 @@ export default function App() {
   const [props, setProps] = useState<{ table: TableInfo; data: TableProps } | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [restoreFile, setRestoreFile] = useState<string | null>(null);
+  const [csvJob, setCsvJob] = useState<CsvJob | null>(null);
   const [test, setTest] = useState<{ ok: boolean; msg: string } | null>(null);
   const [testing, setTesting] = useState(false);
   const [version, setVersion] = useState("");
@@ -1142,6 +1316,7 @@ export default function App() {
       if (addRow) return setAddRow(null);
       if (confirmDel) return setConfirmDel(null);
       if (restoreFile) return setRestoreFile(null);
+      if (csvJob) return setCsvJob(null);
       if (props) return setProps(null);
       if (exportOpen) return setExportOpen(false);
       if (erOpen) return setErOpen(false);
@@ -1150,7 +1325,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
-  }, [tblMenu, logOpen, danger, addRow, confirmDel, restoreFile, props, exportOpen, erOpen, form, updatesOpen, pct]);
+  }, [tblMenu, logOpen, danger, addRow, confirmDel, restoreFile, csvJob, props, exportOpen, erOpen, form, updatesOpen, pct]);
 
   useEffect(() => hist.save(log), [log]);
 
@@ -1638,15 +1813,52 @@ export default function App() {
       } else if (!picked) {
         say("เลือกตารางปลายทางในแถบซ้ายก่อน");
       } else {
-        const n = await invoke<number>("import_csv", { conn: activeConn, path, table: qname(picked) });
-        say(`นำเข้า ${n} แถว → ${picked.name}`);
+        const [head, tp] = await Promise.all([
+          invoke<CsvHead>("csv_head", { path }),
+          invoke<TableProps>("table_props", { conn: activeConn, table: qname(picked) }),
+        ]);
+        setCsvJob({
+          path,
+          table: picked,
+          head,
+          tcols: tp.columns,
+          mode: "insert",
+          keys: tp.columns.filter((c) => c.pk && head.columns.includes(c.name)).map((c) => c.name),
+          cols: [],
+        });
       }
     } catch (e) {
       say(String(e));
     } finally {
       setBusy(false);
     }
-  }, [connected, picked, refresh, say]);
+  }, [connected, activeConn, picked, refresh, say]);
+
+  const runCsv = useCallback(async () => {
+    if (!csvJob) return;
+    const { path, table, keys, cols } = csvJob;
+    setBusy(true);
+    try {
+      if (csvJob.mode === "insert") {
+        const n = await invoke<number>("import_csv", { conn: activeConn, path, table: qname(table) });
+        setCsvJob(null);
+        say(`นำเข้า ${n} แถว → ${table.name}`);
+      } else {
+        const done = await invoke<CsvJob["done"]>("update_csv", {
+          conn: activeConn,
+          path,
+          table: qname(table),
+          keys,
+          cols,
+        });
+        setCsvJob({ ...csvJob, done });
+      }
+    } catch (e) {
+      setCsvJob({ ...csvJob, err: String(e) });
+    } finally {
+      setBusy(false);
+    }
+  }, [csvJob, activeConn, say]);
 
   /* ลากคลุมไว้ = รันเฉพาะที่คลุม, ไม่ได้คลุม = รันเฉพาะคำสั่งที่เคอร์เซอร์อยู่ */
   const runNow = useCallback(() => {
@@ -2687,6 +2899,8 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {csvJob && <CsvModal job={csvJob} set={setCsvJob} run={runCsv} busy={busy} />}
 
       {restoreFile && (
         <div className="overlay" onClick={() => setRestoreFile(null)}>
