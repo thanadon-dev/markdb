@@ -29,6 +29,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   ArrowClockwise,
   ArrowCounterClockwise,
+  ArrowsLeftRight,
   CheckCircle,
   Database,
   DownloadSimple,
@@ -107,6 +108,19 @@ type CsvJob = {
   cols: string[];
   err?: string;
   done?: { updated: number; missing: string[] };
+};
+type SyncSample = { op: "+" | "~" | "-"; key: string; cells: [string, string | null, string | null][] };
+type SyncPlan = {
+  schema: string;
+  name: string;
+  diffs: string[];
+  ddl: string[];
+  error: string | null;
+  add: number;
+  change: number;
+  del: number;
+  sample: SyncSample[];
+  done: boolean;
 };
 type Release = { tag_name: string; name: string; published_at: string; body: string };
 
@@ -578,6 +592,391 @@ function CsvModal({
               </button>
               <button className="btn primary sm" onClick={run} disabled={!ready || busy}>
                 {busy ? "กำลังทำ…" : up ? "อัปเดต" : `นำเข้า ${job.head.rows.toLocaleString()} แถว`}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const tid = (t: { schema: string; name: string }) => `${t.schema}.${t.name}`;
+const nul = (v: string | null) => (v === null ? "NULL" : v);
+
+/* Sync: ทำให้ตารางในปลายทางเหมือนต้นทางทั้งโครงสร้างและข้อมูล
+   เลือกตาราง → ตรวจสอบ (preview ไม่เขียนอะไร) → พิมพ์ชื่อปลายทางยืนยัน → สำรองแล้ว sync */
+function SyncModal({
+  conns,
+  live,
+  first,
+  picked,
+  busy,
+  setBusy,
+  close,
+  done,
+}: {
+  conns: Conn[];
+  live: Record<string, Meta>;
+  first: string;
+  picked: TableInfo | null;
+  busy: boolean;
+  setBusy: (b: boolean) => void;
+  close: () => void;
+  done: (dst: string) => void;
+}) {
+  const [src, setSrc] = useState(first);
+  const [dst, setDst] = useState(() => conns.find((c) => c.id !== first)?.id ?? "");
+  const [sel, setSel] = useState<string[]>(picked ? [tid(picked)] : []);
+  const [filter, setFilter] = useState("");
+  const [del, setDel] = useState(true);
+  const [plans, setPlans] = useState<SyncPlan[] | null>(null);
+  const [alter, setAlter] = useState<string[]>([]);
+  const [openT, setOpenT] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<string | null>(null);
+  const [result, setResult] = useState<{ plans: SyncPlan[]; backup: string } | null>(null);
+  const [err, setErr] = useState("");
+
+  const name = (id: string) => conns.find((c) => c.id === id)?.name ?? id;
+  const tables = (live[src]?.tables ?? []).filter((t) => t.kind === "table");
+  const list = tables.filter((t) => tid(t).toLowerCase().includes(filter.toLowerCase()));
+  const chosen = tables.filter((t) => sel.includes(tid(t)));
+  const go = (plans ?? []).filter((p) => !p.error && (p.diffs.length === 0 || alter.includes(tid(p))));
+  const sum = (k: "add" | "change" | "del") => go.reduce((n, p) => n + p[k], 0);
+  const toggle = (id: string) => setSel(sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id]);
+
+  const check = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      const ps = await invoke<SyncPlan[]>("sync_plan", { src, dst, tables: chosen });
+      setPlans(ps);
+      setOpenT(ps.find((p) => !p.error && (p.diffs.length || p.add + p.change + p.del))?.name ?? null);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const apply = async () => {
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+    const backup = await save({
+      title: `เก็บข้อมูลเดิมของ ${name(dst)} ไว้ก่อน sync`,
+      defaultPath: `${name(dst)}-before-sync-${stamp}.sql`,
+      filters: [{ name: "SQL", extensions: ["sql"] }],
+    });
+    if (!backup) return;
+    setBusy(true);
+    setErr("");
+    try {
+      const ps = await invoke<SyncPlan[]>("sync_apply", { src, dst, tables: chosen, alter, delete: del, backup });
+      setResult({ plans: ps, backup });
+      done(dst);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const counts = (p: SyncPlan) =>
+    p.add + p.change + p.del === 0 ? (
+      <span className="okc">ข้อมูลตรงกันแล้ว</span>
+    ) : (
+      <>
+        <span className="addc">+{p.add}</span>
+        <span className="chgc">~{p.change}</span>
+        <span className={"delc" + (del ? "" : " off")} title={del ? "จะถูกลบ" : "ไม่ลบ"}>
+          −{p.del}
+        </span>
+      </>
+    );
+
+  return (
+    <div className="overlay">
+      <div className="modal wide syncmodal">
+        <Close on={() => !busy && close()} />
+        <h3>
+          <ArrowsLeftRight size={17} weight="duotone" /> Sync ตาราง
+        </h3>
+        <div className="syncends">
+          <select
+            value={src}
+            disabled={!!plans}
+            onChange={(e) => {
+              const v = e.target.value;
+              setSrc(v);
+              setSel([]);
+              if (v === dst) setDst(conns.find((c) => c.id !== v)?.id ?? "");
+            }}
+          >
+            {conns.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+          <span>→</span>
+          <select value={dst} disabled={!!plans} onChange={(e) => setDst(e.target.value)}>
+            {conns
+              .filter((c) => c.id !== src)
+              .map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+          </select>
+        </div>
+
+        {result ? (
+          <>
+            <div className="testres ok">
+              <CheckCircle size={16} weight="fill" />
+              <span>
+                Sync เข้า {name(dst)} เสร็จ — {result.plans.filter((p) => p.done).length} ตาราง
+              </span>
+            </div>
+            <div className="cols syncres">
+              {result.plans.map((p) => (
+                <div key={tid(p)} className={p.done ? "" : "skip"}>
+                  <b>{p.name}</b>
+                  <span>
+                    {p.done
+                      ? `+${p.add} ~${p.change} −${del ? p.del : 0}${p.diffs.length ? " · แก้โครงสร้างแล้ว" : ""}`
+                      : `ข้าม — ${p.error ?? "โครงสร้างไม่ตรง"}`}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <p className="csvpath">
+              ข้อมูลเดิมของ {name(dst)} สำรองไว้ที่ {result.backup} — ใช้ปุ่ม Restore (ตอนเชื่อมต่อ {name(dst)}{" "}
+              อยู่) เพื่อย้อนกลับ
+            </p>
+          </>
+        ) : confirm !== null ? (
+          <>
+            <div className="warn">
+              <div>
+                ปลายทาง <b>{name(dst)}</b> · {go.length} ตาราง · +{sum("add")} ~{sum("change")}{" "}
+                {del ? `−${sum("del")}` : "(ไม่ลบแถว)"}
+              </div>
+              {go.some((p) => p.diffs.length > 0) && (
+                <div>
+                  แก้โครงสร้าง:{" "}
+                  {go
+                    .filter((p) => p.diffs.length > 0)
+                    .map((p) => p.name)
+                    .join(", ")}
+                </div>
+              )}
+              {plans!.length > go.length && (
+                <div>
+                  ข้าม:{" "}
+                  {plans!
+                    .filter((p) => !go.includes(p))
+                    .map((p) => p.name)
+                    .join(", ")}
+                </div>
+              )}
+              <div>
+                กดแล้วจะให้เลือกที่เก็บไฟล์สำรองข้อมูลเดิมของ {name(dst)} ก่อน · ทุกตารางรันใน transaction เดียว
+                พังกลางทางจะไม่มีอะไรถูกแก้
+              </div>
+            </div>
+            <p className="syncconfirm">
+              พิมพ์ <b>{name(dst)}</b> เพื่อยืนยัน
+            </p>
+            <input
+              autoFocus
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && confirm === name(dst) && !busy && apply()}
+            />
+          </>
+        ) : plans ? (
+          <>
+            <p>
+              คลิกชื่อตารางเพื่อดูรายละเอียด · <span className="addc">+เพิ่ม</span>{" "}
+              <span className="chgc">~แก้</span> <span className="delc">−ลบ</span>
+            </p>
+            <div className="cols synclist">
+              {plans.map((p) => {
+                const id = tid(p);
+                const open = openT === p.name;
+                const alt = alter.includes(id);
+                return (
+                  <div key={id} className="syncplan">
+                    <button className="synchead" onClick={() => setOpenT(open ? null : p.name)}>
+                      <CaretRight size={11} className={open ? "caret open" : "caret"} />
+                      <b>{p.name}</b>
+                      {p.schema !== "public" && <em>{p.schema}</em>}
+                      <span className="syncstat">
+                        {p.error ? (
+                          <span className="badc">ข้าม — {p.error}</span>
+                        ) : (
+                          <>
+                            {p.diffs.length > 0 && (
+                              <span className="warnc">โครงสร้างต่าง {p.diffs.length} จุด</span>
+                            )}
+                            {counts(p)}
+                          </>
+                        )}
+                      </span>
+                    </button>
+                    {!p.error && p.diffs.length > 0 && (
+                      <div className="seg syncalt">
+                        <button className={alt ? "" : "on"} onClick={() => setAlter(alter.filter((x) => x !== id))}>
+                          ข้ามตารางนี้
+                        </button>
+                        <button className={alt ? "on" : ""} onClick={() => setAlter([...alter, id])}>
+                          ALTER ให้เหมือนต้นทาง
+                        </button>
+                      </div>
+                    )}
+                    {open && !p.error && (
+                      <div className="syncbody">
+                        {p.diffs.length > 0 && (
+                          <>
+                            <ul>
+                              {p.diffs.map((d) => (
+                                <li key={d}>{d}</li>
+                              ))}
+                            </ul>
+                            <pre>{p.ddl.join(";\n")};</pre>
+                          </>
+                        )}
+                        {p.sample.length > 0 && (
+                          <table className="csvprev syncsample">
+                            <tbody>
+                              {p.sample.map((s, i) => (
+                                <tr key={i}>
+                                  <td className={{ "+": "addc", "~": "chgc", "-": "delc" }[s.op]}>
+                                    {s.op === "-" ? "−" : s.op}
+                                  </td>
+                                  <td>{s.key}</td>
+                                  <td>
+                                    {s.op === "~"
+                                      ? s.cells.map(([c, o, n]) => (
+                                          <span key={c} className="cellchg">
+                                            {c}: <s>{nul(o)}</s> → <b>{nul(n)}</b>
+                                          </span>
+                                        ))
+                                      : s.op === "+"
+                                        ? s.cells.map(([c, , n]) => `${c}=${nul(n)}`).join("  ")
+                                        : del
+                                          ? "มีแค่ในปลายทาง — จะถูกลบ"
+                                          : "มีแค่ในปลายทาง — ไม่ลบ"}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                        {p.add + p.change + p.del > p.sample.length && (
+                          <p className="csvskip">
+                            ตัวอย่าง {p.sample.length} จาก {p.add + p.change + p.del} แถว
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <label className="check syncdel">
+              <input type="checkbox" checked={del} onChange={(e) => setDel(e.target.checked)} />
+              ลบแถวที่มีแค่ใน {name(dst)} (ให้ตรงกันทุกแถว)
+            </label>
+          </>
+        ) : (
+          <>
+            <p>
+              เลือกตารางจาก <b>{name(src)}</b> ที่จะทำให้ <b>{name(dst) || "—"}</b> เหมือนกันทั้งโครงสร้างและข้อมูล —
+              กดตรวจสอบแล้วจะเห็น preview ก่อน ยังไม่มีอะไรถูกแก้
+            </p>
+            <input
+              className="syncfilter"
+              placeholder="ค้นหาตาราง…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+            <div className="cols synclist">
+              <label className="check syncrow head">
+                <input
+                  type="checkbox"
+                  checked={list.length > 0 && list.every((t) => sel.includes(tid(t)))}
+                  onChange={(e) =>
+                    setSel(
+                      e.target.checked
+                        ? [...new Set([...sel, ...list.map(tid)])]
+                        : sel.filter((x) => !list.some((t) => tid(t) === x)),
+                    )
+                  }
+                />
+                เลือกทั้งหมด ({list.length})
+              </label>
+              {list.map((t) => (
+                <label className="check syncrow" key={tid(t)}>
+                  <input type="checkbox" checked={sel.includes(tid(t))} onChange={() => toggle(tid(t))} />
+                  {t.name}
+                  {t.schema !== "public" && <em>{t.schema}</em>}
+                </label>
+              ))}
+            </div>
+          </>
+        )}
+
+        {err && (
+          <div className="testres bad">
+            <WarningCircle size={16} weight="fill" />
+            <span>{err}</span>
+          </div>
+        )}
+
+        <div className="modal-foot">
+          {result ? (
+            <button className="btn primary sm" onClick={close}>
+              ปิด
+            </button>
+          ) : confirm !== null ? (
+            <>
+              <button className="btn sm" onClick={() => setConfirm(null)} disabled={busy}>
+                ย้อนกลับ
+              </button>
+              <button
+                className="btn primary sm danger"
+                onClick={apply}
+                disabled={confirm !== name(dst) || busy}
+              >
+                {busy ? "กำลัง sync…" : `Sync เข้า ${name(dst)}`}
+              </button>
+            </>
+          ) : plans ? (
+            <>
+              <button
+                className="btn sm"
+                onClick={() => {
+                  setPlans(null);
+                  setErr("");
+                }}
+              >
+                เลือกตารางใหม่
+              </button>
+              <button className="btn sm" onClick={check} disabled={busy}>
+                ตรวจสอบอีกครั้ง
+              </button>
+              <button className="btn primary sm" onClick={() => setConfirm("")} disabled={!go.length}>
+                Sync {go.length} ตาราง
+              </button>
+            </>
+          ) : (
+            <>
+              <button className="btn sm" onClick={close}>
+                ยกเลิก
+              </button>
+              <button className="btn primary sm" onClick={check} disabled={!sel.length || !dst || busy}>
+                {busy ? "กำลังตรวจสอบ…" : `ตรวจสอบ ${sel.length} ตาราง`}
               </button>
             </>
           )}
@@ -1194,6 +1593,7 @@ export default function App() {
   const [exportOpen, setExportOpen] = useState(false);
   const [restoreFile, setRestoreFile] = useState<string | null>(null);
   const [csvJob, setCsvJob] = useState<CsvJob | null>(null);
+  const [syncOpen, setSyncOpen] = useState(false);
   const [test, setTest] = useState<{ ok: boolean; msg: string } | null>(null);
   const [testing, setTesting] = useState(false);
   const [version, setVersion] = useState("");
@@ -1317,6 +1717,7 @@ export default function App() {
       if (confirmDel) return setConfirmDel(null);
       if (restoreFile) return setRestoreFile(null);
       if (csvJob) return setCsvJob(null);
+      if (syncOpen) return busy || setSyncOpen(false);
       if (props) return setProps(null);
       if (exportOpen) return setExportOpen(false);
       if (erOpen) return setErOpen(false);
@@ -1325,7 +1726,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
-  }, [tblMenu, logOpen, danger, addRow, confirmDel, restoreFile, csvJob, props, exportOpen, erOpen, form, updatesOpen, pct]);
+  }, [tblMenu, logOpen, danger, addRow, confirmDel, restoreFile, csvJob, syncOpen, busy, props, exportOpen, erOpen, form, updatesOpen, pct]);
 
   useEffect(() => hist.save(log), [log]);
 
@@ -1787,7 +2188,7 @@ export default function App() {
     setBusy(true);
     say("กำลัง restore…");
     try {
-      await invoke("import_sql", { path: restoreFile });
+      await invoke("import_sql", { conn: activeConn, path: restoreFile });
       say("restore สำเร็จ");
       refresh();
     } catch (e) {
@@ -1795,7 +2196,7 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }, [restoreFile, refresh, say]);
+  }, [restoreFile, activeConn, refresh, say]);
 
   const importFile = useCallback(async () => {
     if (!connected) return say("ยังไม่ได้เชื่อมต่อ");
@@ -2136,6 +2537,18 @@ export default function App() {
             title="รันไฟล์ .sql กลับเข้า database ที่เชื่อมต่ออยู่"
           >
             <ArrowCounterClockwise size={15} weight="duotone" /> Restore
+          </button>
+          <button
+            className="btn sm"
+            onClick={() =>
+              conns.filter((c) => live[c.id]).length < 2
+                ? say("ต้องเชื่อมต่ออย่างน้อย 2 connection (ต้นทางกับปลายทาง) ก่อน")
+                : setSyncOpen(true)
+            }
+            disabled={!connected}
+            title="ทำให้ตารางใน database อีกตัวเหมือนกับตัวนี้ ทั้งโครงสร้างและข้อมูล"
+          >
+            <ArrowsLeftRight size={15} weight="duotone" /> Sync
           </button>
         </div>
       </aside>
@@ -2901,6 +3314,19 @@ export default function App() {
       )}
 
       {csvJob && <CsvModal job={csvJob} set={setCsvJob} run={runCsv} busy={busy} />}
+
+      {syncOpen && (
+        <SyncModal
+          conns={conns.filter((c) => live[c.id])}
+          live={live}
+          first={activeConn}
+          picked={picked}
+          busy={busy}
+          setBusy={setBusy}
+          close={() => setSyncOpen(false)}
+          done={(id) => loadMeta(id).catch(() => {})}
+        />
+      )}
 
       {restoreFile && (
         <div className="overlay" onClick={() => setRestoreFile(null)}>

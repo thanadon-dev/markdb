@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::time::Instant;
 use tokio::sync::Mutex;
 
+mod sync;
+
 const MAX_ROWS: usize = 5000;
 
 /// Redshift พูด wire protocol เดียวกับ Postgres แต่ไม่มี pg_catalog หลายตัวและไม่มี
@@ -1437,6 +1439,8 @@ pub fn run() {
             import_csv,
             csv_head,
             update_csv,
+            sync::sync_plan,
+            sync::sync_apply,
             import_sql,
             backup_database
         ])
