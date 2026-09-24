@@ -579,6 +579,16 @@ struct KeyVal {
     value: Option<String>,
 }
 
+fn where_keys(keys: &[KeyVal]) -> String {
+    keys.iter()
+        .map(|k| match &k.value {
+            None => format!("{} is null", ident(&k.column)),
+            v => format!("{} = {}", ident(&k.column), lit(v)),
+        })
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
 /// เพิ่มแถวใหม่ — ส่งมาเฉพาะคอลัมน์ที่ผู้ใช้กรอกจริง
 /// คอลัมน์ที่ไม่ได้ส่งมาจะได้ DEFAULT ของตาราง (serial/uuid/now() จึงทำงานตามปกติ)
 #[tauri::command]
@@ -635,14 +645,7 @@ async fn delete_row(
         return Err("ตารางนี้ไม่มี primary key จึงลบแถวตรง ๆ ไม่ได้".into());
     }
     let p = pool(&state, &conn).await?;
-    let where_sql = keys
-        .iter()
-        .map(|k| match &k.value {
-            None => format!("{} is null", ident(&k.column)),
-            v => format!("{} = {}", ident(&k.column), lit(v)),
-        })
-        .collect::<Vec<_>>()
-        .join(" and ");
+    let where_sql = where_keys(&keys);
     let sql = format!("delete from {} where {}", table, where_sql);
 
     let mut tx = p.begin().await.map_err(err)?;
@@ -684,14 +687,7 @@ async fn update_cell(
         return Err("ตารางนี้ไม่มี primary key จึงแก้ค่าตรง ๆ ไม่ได้".into());
     }
     let p = pool(&state, &conn).await?;
-    let where_sql = keys
-        .iter()
-        .map(|k| match &k.value {
-            None => format!("{} is null", ident(&k.column)),
-            v => format!("{} = {}", ident(&k.column), lit(v)),
-        })
-        .collect::<Vec<_>>()
-        .join(" and ");
+    let where_sql = where_keys(&keys);
     let sql = format!(
         "update {} set {} = {} where {}",
         table,
@@ -962,6 +958,142 @@ async fn import_csv(path: String, table: String, conn: String,
         .map_err(err)?;
     copy.send(bytes.as_slice()).await.map_err(err)?;
     copy.finish().await.map_err(err)
+}
+
+/// หัวไฟล์ Excel ติด BOM มากับคอลัมน์แรก — ไม่ตัดทิ้งจะจับคู่ชื่อคอลัมน์ไม่เจอ
+fn csv_headers(rdr: &mut csv::Reader<std::fs::File>) -> R<Vec<String>> {
+    Ok(rdr
+        .headers()
+        .map_err(err)?
+        .iter()
+        .map(|h| h.trim_start_matches('\u{feff}').trim().to_string())
+        .collect())
+}
+
+/// ช่องว่างหรือคำว่า NULL (แบบที่ SQL Server/Excel export มา) = NULL
+fn csv_val(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("null") {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+#[derive(Serialize)]
+struct CsvHead {
+    columns: Vec<String>,
+    sample: Vec<Vec<String>>,
+    rows: usize,
+}
+
+/// หัวคอลัมน์ + ตัวอย่าง 5 แถวแรก + จำนวนแถว ไว้ให้ UI เลือกคอลัมน์และ preview
+#[tauri::command]
+fn csv_head(path: String) -> R<CsvHead> {
+    let mut rdr = csv::Reader::from_path(&path).map_err(err)?;
+    let columns = csv_headers(&mut rdr)?;
+    let (mut sample, mut rows) = (Vec::new(), 0);
+    for rec in rdr.records() {
+        let rec = rec.map_err(err)?;
+        if sample.len() < 5 {
+            sample.push(rec.iter().map(String::from).collect());
+        }
+        rows += 1;
+    }
+    Ok(CsvHead { columns, sample, rows })
+}
+
+/// อ่าน CSV แล้วประกอบ UPDATE ทีละบรรทัด คืน (บรรทัดในไฟล์, sql, ค่า key ไว้รายงาน)
+/// ค่าส่งเป็น literal ไม่ระบุ type ให้ database cast เอง ('1'/'0' เข้าคอลัมน์ boolean ได้ตรง ๆ)
+fn csv_updates(
+    path: &str,
+    table: &str,
+    keys: &[String],
+    cols: &[String],
+) -> R<Vec<(usize, String, String)>> {
+    if keys.is_empty() || cols.is_empty() {
+        return Err("ต้องเลือกคอลัมน์ key และคอลัมน์ที่จะแก้ อย่างน้อยอย่างละ 1".into());
+    }
+    let mut rdr = csv::Reader::from_path(path).map_err(err)?;
+    let headers = csv_headers(&mut rdr)?;
+    let idx = |c: &String| {
+        headers
+            .iter()
+            .position(|h| h == c)
+            .ok_or_else(|| format!("ไม่มีคอลัมน์ {} ในไฟล์ CSV", c))
+    };
+    let ki = keys.iter().map(idx).collect::<R<Vec<_>>>()?;
+    let ci = cols.iter().map(idx).collect::<R<Vec<_>>>()?;
+
+    let mut out = Vec::new();
+    for (i, rec) in rdr.records().enumerate() {
+        let line = i + 2; // นับหัวตารางเป็นบรรทัด 1
+        let rec = rec.map_err(|e| format!("บรรทัด {}: {}", line, e))?;
+        let get = |j: usize| csv_val(rec.get(j).unwrap_or(""));
+        let kv: Vec<KeyVal> = keys
+            .iter()
+            .zip(&ki)
+            .map(|(c, &j)| KeyVal { column: c.clone(), value: get(j) })
+            .collect();
+        let set = cols
+            .iter()
+            .zip(&ci)
+            .map(|(c, &j)| format!("{} = {}", ident(c), lit(&get(j))))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let label = kv
+            .iter()
+            .map(|k| k.value.clone().unwrap_or_else(|| "NULL".into()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push((line, format!("update {} set {} where {}", table, set, where_keys(&kv)), label));
+    }
+    Ok(out)
+}
+
+#[derive(Serialize)]
+struct CsvUpdate {
+    updated: u64,
+    missing: Vec<String>,
+}
+
+/// แก้แถวที่มีอยู่แล้วจาก CSV — จับคู่แถวด้วยคอลัมน์ key แล้วแก้เฉพาะคอลัมน์ใน cols
+/// ทั้งไฟล์อยู่ใน transaction เดียว — แถวไหน error หรือ key ตรงเกิน 1 แถว ยกเลิกทั้งหมด
+/// (กันเลือก key ผิด เช่นคอลัมน์ที่ค่าซ้ำกัน แล้วทุกแถวโดนเขียนทับด้วยค่าแถวสุดท้าย)
+// ponytail: UPDATE ทีละแถว หลักหมื่นแถวไหว ถ้าหลักแสนให้ COPY เข้า temp table แล้ว UPDATE ... FROM
+#[tauri::command]
+async fn update_csv(
+    path: String,
+    table: String,
+    keys: Vec<String>,
+    cols: Vec<String>,
+    conn: String,
+    state: tauri::State<'_, AppState>,
+) -> R<CsvUpdate> {
+    let stmts = csv_updates(&path, &table, &keys, &cols)?;
+    let p = pool(&state, &conn).await?;
+    // error แล้ว return ออกไปก่อน commit — sqlx rollback ให้เองตอน tx ถูก drop
+    let mut tx = p.begin().await.map_err(err)?;
+    let mut out = CsvUpdate { updated: 0, missing: Vec::new() };
+    for (line, sql, label) in stmts {
+        let n = (&mut *tx)
+            .execute(sql.as_str())
+            .await
+            .map_err(|e| format!("บรรทัด {}: {}", line, e))?
+            .rows_affected();
+        match n {
+            0 => out.missing.push(label),
+            1 => out.updated += 1,
+            _ => {
+                return Err(format!(
+                    "บรรทัด {} (key {}) ตรงกับ {} แถวในตาราง — key นี้ไม่ unique จึงยกเลิกทั้งหมด ไม่มีอะไรถูกแก้",
+                    line, label, n
+                ))
+            }
+        }
+    }
+    tx.commit().await.map_err(err)?;
+    Ok(out)
 }
 
 /// Redshift ไม่รับ COPY FROM STDIN (COPY ของมันอ่านจาก S3 เท่านั้น) — ใช้ INSERT
@@ -1303,6 +1435,8 @@ pub fn run() {
             export_sql,
             export_json,
             import_csv,
+            csv_head,
+            update_csv,
             import_sql,
             backup_database
         ])
@@ -1373,6 +1507,49 @@ mod tests {
         assert_eq!(sql_literal(&json!(true)), "true");
         assert_eq!(sql_literal(&json!("o'brien")), "'o''brien'");
         assert_eq!(sql_literal(&json!({"a":1})), "'{\"a\":1}'");
+    }
+
+    #[test]
+    fn csv_nulls_and_keys() {
+        assert_eq!(csv_val(""), None);
+        assert_eq!(csv_val(" NULL "), None);
+        assert_eq!(csv_val("null"), None);
+        assert_eq!(csv_val("0"), Some("0".into()));
+        let k = |c: &str, v: Option<&str>| KeyVal { column: c.into(), value: v.map(Into::into) };
+        assert_eq!(where_keys(&[k("Meter_ID", Some("234"))]), "\"Meter_ID\" = '234'");
+        assert_eq!(
+            where_keys(&[k("a", Some("o'b")), k("b", None)]),
+            "\"a\" = 'o''b' and \"b\" is null"
+        );
+    }
+
+    #[test]
+    fn csv_to_updates() {
+        let path = std::env::temp_dir().join("markdb_csv_updates_test.csv");
+        std::fs::write(
+            &path,
+            "\u{feff}Meter_ID,Is_Active,IsActive,IsDelete\n234,0,0,1\n145,1,1,NULL\n",
+        )
+        .unwrap();
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let got = csv_updates(
+            path.to_str().unwrap(),
+            "\"public\".\"t\"",
+            &s(&["Meter_ID"]),
+            &s(&["IsActive", "IsDelete"]),
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            vec![
+                (2, "update \"public\".\"t\" set \"IsActive\" = '0', \"IsDelete\" = '1' where \"Meter_ID\" = '234'".into(), "234".into()),
+                (3, "update \"public\".\"t\" set \"IsActive\" = '1', \"IsDelete\" = NULL where \"Meter_ID\" = '145'".into(), "145".into()),
+            ]
+        );
+        let bad = csv_updates(path.to_str().unwrap(), "t", &s(&["Nope"]), &s(&["IsActive"]));
+        assert!(bad.unwrap_err().contains("Nope"));
+        assert!(csv_updates(path.to_str().unwrap(), "t", &s(&["Meter_ID"]), &[]).is_err());
+        std::fs::remove_file(path).ok();
     }
 
     #[test]
