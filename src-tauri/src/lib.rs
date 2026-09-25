@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 use tokio::sync::Mutex;
 
+mod ai;
 mod sync;
 
 const MAX_ROWS: usize = 5000;
@@ -180,10 +181,11 @@ async fn list_tables(conn: String,
 /// (schema, table, column) ทั้ง database — ใช้ป้อน autocomplete ฝั่ง editor
 #[tauri::command]
 async fn list_all_columns(conn: String,
-    state: tauri::State<'_, AppState>) -> R<Vec<(String, String, String)>> {
+    state: tauri::State<'_, AppState>) -> R<Vec<(String, String, String, String)>> {
     let p = pool(&state, &conn).await?;
+    // type ไม่ได้ใช้กับ autocomplete แต่ส่งให้ AI รู้ว่าคอลัมน์ไหนเป็น bool/วันที่/ตัวเลข
     sqlx::query_as(
-        "select table_schema, table_name, column_name from information_schema.columns
+        "select table_schema, table_name, column_name, data_type from information_schema.columns
          where table_schema not in ('pg_catalog','information_schema')
          order by table_schema, table_name, ordinal_position",
     )
@@ -1424,6 +1426,7 @@ pub fn run() {
     }
 
     builder
+        .manage(ai::Ai::default())
         .manage(AppState {
             conns: Mutex::new(HashMap::new()),
         })
@@ -1449,6 +1452,8 @@ pub fn run() {
             csv_head,
             update_csv,
             sync::sync_plan,
+            ai::ai_sql,
+            ai::ai_cancel,
             sync::sync_apply,
             import_sql,
             backup_database
