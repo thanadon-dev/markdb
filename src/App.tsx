@@ -300,6 +300,9 @@ const cellText = (v: unknown) =>
       ? JSON.stringify(v)
       : String(v);
 
+/* ค่าที่ copy ออกไป: NULL เป็นช่องว่าง ไม่ใช่คำว่า "NULL" — วางลง Excel/ที่อื่นแล้วเป็นค่าว่างจริง */
+const copyText = (v: unknown) => (v === null || v === undefined ? "" : cellText(v));
+
 /* ตัวเลขเทียบเป็นตัวเลข (ไม่งั้น "10" < "9"), ที่เหลือเทียบแบบภาษาไทย */
 const compare = (a: unknown, b: unknown) => {
   if (typeof a === "number" && typeof b === "number") return a - b;
@@ -1241,14 +1244,14 @@ const Grid = memo(function Grid({
     const cols = res.columns.slice(rect.c1, rect.c2 + 1);
     return order
       .slice(rect.r1, rect.r2 + 1)
-      .map((i) => cols.map((c) => cellText(res.rows[i][c])).join("\t"))
+      .map((i) => cols.map((c) => copyText(res.rows[i][c])).join("\t"))
       .join("\n");
   };
 
   // เรียงตามที่เห็นบนจอ ไม่ใช่ตามลำดับที่คลิก — copy/export จะได้ตรงกับตา
   const picked = () => order.filter((i) => sel.has(i)).map((i) => res.rows[i]);
   const asTsv = (rows: Record<string, unknown>[]) =>
-    rows.map((r) => res.columns.map((c) => cellText(r[c])).join("\t")).join("\n");
+    rows.map((r) => res.columns.map((c) => copyText(r[c])).join("\t")).join("\n");
 
   const startEdit = (r: number, c: number, initial?: string) => {
     if (!editable) return;
@@ -1336,7 +1339,7 @@ const Grid = memo(function Grid({
       selectRows(0, order.length - 1);
     } else if ((e.ctrlKey || e.metaKey) && k.toLowerCase() === "c") {
       e.preventDefault();
-      onCopy(manyCells ? rectTsv() : cellText(res.rows[order[cur.r]][res.columns[cur.c]]));
+      onCopy(manyCells ? rectTsv() : copyText(res.rows[order[cur.r]][res.columns[cur.c]]));
     } else if (k.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
       // พิมพ์ตัวอักษรทับได้เลยแบบสเปรดชีต ไม่ต้องดับเบิลคลิกก่อน
       e.preventDefault();
@@ -1423,7 +1426,7 @@ const Grid = memo(function Grid({
                     title={cellText(row[c])}
                     onMouseDown={() => (setCur({ r: vr, c: ci }), onSelect([order[vr]]))}
                     onDoubleClick={() =>
-                      editable ? startEdit(vr, ci) : onCopy(cellText(row[c]))
+                      editable ? startEdit(vr, ci) : onCopy(copyText(row[c]))
                     }
                   >
                     {cellText(row[c])}
@@ -1516,7 +1519,7 @@ const Grid = memo(function Grid({
                     // ต้องคลุมไกลกว่านั้นให้เลื่อนแล้ว shift+click ปลายทางแทน
                     onMouseEnter={() => dragging.current && extendTo(vi.index, ci)}
                     onDoubleClick={() =>
-                      editable ? startEdit(vi.index, ci) : onCopy(cellText(row[c]))
+                      editable ? startEdit(vi.index, ci) : onCopy(copyText(row[c]))
                     }
                   >
                     {cellText(row[c])}
@@ -1627,10 +1630,19 @@ export default function App() {
     null,
   );
   const [busy, setBusy] = useState(false);
+  const [connecting, setConnecting] = useState<string | null>(null);
 
   const tab = tabs.find((t) => t.id === activeTab) ?? tabs[0];
   const tabConn = tab?.conn || activeConn;
   const connected = !!live[activeConn];
+  // ข้อความที่มุมขวาล่าง + แถบวิ่งด้านบน ตอนแอปกำลังทำอะไรอยู่ (ว่าง = ไม่ได้ทำอะไร)
+  const working = connecting
+    ? `กำลังเชื่อมต่อ ${conns.find((c) => c.id === connecting)?.name ?? ""}…`
+    : tab?.running
+      ? "กำลังรัน query…"
+      : busy
+        ? "กำลังทำงาน…"
+        : "";
   // sidebar โชว์ของ connection ที่เลือกอยู่ ส่วน autocomplete ใช้ของ connection ที่แท็บผูกไว้
   const tables = live[activeConn]?.tables ?? [];
   const schema = live[tabConn]?.schema ?? {};
@@ -1760,6 +1772,7 @@ export default function App() {
   const doConnect = useCallback(
     async (c: Conn) => {
       setBusy(true);
+      setConnecting(c.id);
       try {
         const info = await invoke<ConnInfo>("connect", { conn: c.id, url: connUrl(c) });
         setActiveConn(c.id);
@@ -1775,6 +1788,7 @@ export default function App() {
         say(String(e));
       } finally {
         setBusy(false);
+        setConnecting(null);
       }
     },
     [loadMeta, say],
@@ -2110,7 +2124,14 @@ export default function App() {
 
   useEffect(() => {
     checkUpdate();
-    // เช็คครั้งเดียวตอนเปิด — ไม่ poll ซ้ำ
+    // เปิดแอปทิ้งไว้ทั้งวันก็ยังรู้ว่ามีเวอร์ชันใหม่ — เช็คเงียบ ๆ ทุก 30 นาที
+    // แค่ขึ้น badge ที่เลขเวอร์ชัน ไม่เด้งหน้าต่างทับงานที่ทำอยู่
+    const t = setInterval(() => {
+      check()
+        .then((u) => u && setUpdate(u))
+        .catch(() => {});
+    }, 30 * 60 * 1000);
+    return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2376,6 +2397,7 @@ export default function App() {
           MarkDB
           <button className="verbtn" title="ประวัติเวอร์ชัน / ตรวจหาอัปเดต" onClick={openUpdates}>
             v{version}
+            {update && <span className="newbadge">new update</span>}
           </button>
         </div>
 
@@ -2394,11 +2416,15 @@ export default function App() {
               key={c.id}
               className={"conn" + (activeConn === c.id ? " on" : "")}
               title={connUrl(c)}
-              onClick={() => (live[c.id] ? setActiveConn(c.id) : doConnect(c))}
+              onClick={() => (live[c.id] ? setActiveConn(c.id) : !connecting && doConnect(c))}
             >
               <EngineLogo engine={c.engine ?? "postgres"} size={15} />
               <span>{c.name}</span>
-              <span className={"cdot" + (live[c.id] ? " on" : "")} />
+              {connecting === c.id ? (
+                <Spinner size={12} className="spin cspin" />
+              ) : (
+                <span className={"cdot" + (live[c.id] ? " on" : "")} />
+              )}
               {live[c.id] && (
                 <span
                   className="x"
@@ -2711,12 +2737,21 @@ export default function App() {
         ) : (
           <div className="result">
             <div className="empty">
-              <Database size={34} weight="duotone" />
-              <div>
-                {connected
-                  ? "ดับเบิลคลิกตารางทางซ้าย หรือพิมพ์ SQL แล้วกด Ctrl+Enter"
-                  : "กด + เพิ่ม connection เพื่อเริ่มต้น"}
-              </div>
+              {tab?.running ? (
+                <>
+                  <Spinner size={26} className="spin" />
+                  <div>กำลังรัน query…</div>
+                </>
+              ) : (
+                <>
+                  <Database size={34} weight="duotone" />
+                  <div>
+                    {connected
+                      ? "ดับเบิลคลิกตารางทางซ้าย หรือพิมพ์ SQL แล้วกด Ctrl+Enter"
+                      : "กด + เพิ่ม connection เพื่อเริ่มต้น"}
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -2743,7 +2778,11 @@ export default function App() {
             </>
           )}
           <span style={{ flex: 1 }} />
-          {busy && <span>กำลังทำงาน…</span>}
+          {working && (
+            <span className="working">
+              <Spinner size={12} className="spin" /> {working}
+            </span>
+          )}
         </div>
       </main>
 
@@ -3508,7 +3547,16 @@ export default function App() {
         </div>
       )}
 
-      {toast && (
+      {working && <div className="loadbar" />}
+
+      {connecting && (
+        <div className="toast connecting">
+          <Spinner size={15} className="spin" />
+          กำลังเชื่อมต่อ {conns.find((c) => c.id === connecting)?.name}…
+        </div>
+      )}
+
+      {toast && !connecting && (
         <div className="toast">
           <Lightning size={14} weight="fill" />
           {toast}

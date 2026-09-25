@@ -741,7 +741,16 @@ fn wrappable(sql: &str) -> bool {
         .find(|l| !l.is_empty() && !l.starts_with("--"))
         .unwrap_or("")
         .to_ascii_lowercase();
-    ["select", "with", "table ", "values"]
+    if head.starts_with("with") {
+        // ห่อเป็น subquery ไม่ได้: Redshift ไม่รับ recursive CTE ใน subquery และ Postgres
+        // บังคับให้ CTE ที่มี insert/update/delete อยู่ชั้นนอกสุด — รันดิบแทน (ไม่ตัดแถวฝั่ง server)
+        // เจอคำพวกนี้ในชื่อคอลัมน์/ข้อความก็แค่ไม่ห่อ ผลลัพธ์ยังถูก
+        let lower = sql.to_ascii_lowercase();
+        return !lower
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .any(|w| matches!(w, "recursive" | "insert" | "update" | "delete" | "merge"));
+    }
+    ["select", "table ", "values"]
         .iter()
         .any(|k| head.starts_with(k))
 }
@@ -1461,6 +1470,9 @@ mod tests {
         assert!(!wrappable("insert into t values (1)"));
         assert!(!wrappable("create table t (id int)"));
         assert!(!wrappable("explain select 1"));
+        assert!(!wrappable("WITH RECURSIVE t(n) AS (select 1 union all select n+1 from t where n < 5) select * from t"));
+        assert!(!wrappable("with gone as (delete from t returning *) select * from gone"));
+        assert!(wrappable("with x as (select updated_at from t) select * from x"));
     }
 
     #[test]
