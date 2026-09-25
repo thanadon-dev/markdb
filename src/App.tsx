@@ -4,6 +4,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
+import { listen } from "@tauri-apps/api/event";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { stmtAt, stmtRangeAt, targetTable } from "./sqlsplit";
 import * as hist from "./history";
@@ -30,6 +31,8 @@ import {
   ArrowClockwise,
   ArrowCounterClockwise,
   ArrowsLeftRight,
+  Sparkle,
+  Stop,
   CheckCircle,
   Database,
   DownloadSimple,
@@ -144,6 +147,7 @@ type Conn = {
 
 const CONNS_KEY = "markdb.conns";
 const TABS_KEY = "markdb.tabs";
+const AI_KEY = "markdb.ai";
 const ROW_H = 28;
 const PORTS: Record<Engine, string> = { postgres: "5432", redshift: "5439" };
 
@@ -233,7 +237,12 @@ const loadConns = (): Conn[] => {
   }
 };
 
-type Meta = { tables: TableInfo[]; schema: Record<string, string[]> };
+type Meta = {
+  tables: TableInfo[];
+  schema: Record<string, string[]>;
+  /** [schema, table, column, type] ไว้ส่งให้ AI */
+  cols: [string, string, string, string][];
+};
 
 const newTab = (conn: string, over: Partial<Tab> = {}): Tab => ({
   id: uid(),
@@ -257,6 +266,52 @@ const loadTabs = () => {
 };
 
 const BOOT = loadTabs();
+
+/* ---------- AI เขียน SQL (ผ่าน claude CLI ของผู้ใช้) ---------- */
+
+type AiPrefs = { model: string; effort: string };
+const AI_MODELS = [
+  { id: "claude-sonnet-5", name: "Sonnet 5" },
+  { id: "claude-opus-5", name: "Opus 5" },
+];
+const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+
+const loadAi = (): AiPrefs => {
+  const def = { model: "claude-sonnet-5", effort: "medium" };
+  try {
+    return { ...def, ...JSON.parse(localStorage.getItem(AI_KEY) || "{}") };
+  } catch {
+    return def;
+  }
+};
+
+const aiSystem = (engine: Engine) =>
+  `You write SQL for MarkDB, a desktop database client. Target database: ${
+    engine === "redshift" ? "Amazon Redshift (no recursive CTE inside a subquery, no json_agg)" : "PostgreSQL"
+  }.
+Your reply is typed straight into the SQL editor, so reply with SQL only: no markdown fences, no prose outside SQL comments.
+Start with one short "--" comment saying what the query does, written in the same language as the request. Add brief inline "--" comments only where a join or filter is not obvious.
+Use only tables and columns from the schema. Double-quote identifiers that contain uppercase letters or special characters.
+Write a read-only SELECT unless the request explicitly asks to change data or structure.
+If the request refers to the SQL already in the editor, return the full revised query. If the request is ambiguous, pick the most likely reading and state the assumption in a comment.`;
+
+/* โครงสร้าง DB แบบย่อ ตารางละบรรทัด: schema.table(col type, ...) */
+const schemaText = (m: Meta) => {
+  const by = new Map<string, string[]>();
+  for (const [s, t, c, ty] of m.cols) {
+    const k = `${s}.${t}`;
+    if (!by.has(k)) by.set(k, []);
+    by.get(k)!.push(`${c} ${ty}`);
+  }
+  return [...by].map(([k, cs]) => `${k}(${cs.join(", ")})`).join("\n");
+};
+
+/* โมเดลชอบห่อด้วย ```sql แม้บอกว่าไม่ต้อง — ตัดทิ้ง รวมถึง ` ที่มาครึ่ง ๆ ระหว่าง stream */
+const tidySql = (s: string) =>
+  s
+    .replace(/^\s*```[\w-]*\n?/, "")
+    .replace(/\n?```\s*$/, "")
+    .replace(/`+$/, "");
 
 /* ดึงตารางจาก `from <schema>.<table>` ในตัว query — ใช้บอก CodeMirror ว่าคอลัมน์
    ของตารางไหนควรขึ้นเวลาพิมพ์ใน where/select โดยไม่ต้องพิมพ์ชื่อตารางนำ */
@@ -1631,6 +1686,11 @@ export default function App() {
   );
   const [busy, setBusy] = useState(false);
   const [connecting, setConnecting] = useState<string | null>(null);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiAsk, setAiAsk] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiErr, setAiErr] = useState("");
+  const [ai, setAi] = useState<AiPrefs>(loadAi);
 
   const tab = tabs.find((t) => t.id === activeTab) ?? tabs[0];
   const tabConn = tab?.conn || activeConn;
@@ -1638,7 +1698,9 @@ export default function App() {
   // ข้อความที่มุมขวาล่าง + แถบวิ่งด้านบน ตอนแอปกำลังทำอะไรอยู่ (ว่าง = ไม่ได้ทำอะไร)
   const working = connecting
     ? `กำลังเชื่อมต่อ ${conns.find((c) => c.id === connecting)?.name ?? ""}…`
-    : tab?.running
+    : aiBusy
+      ? "AI กำลังเขียน SQL…"
+      : tab?.running
       ? "กำลังรัน query…"
       : busy
         ? "กำลังทำงาน…"
@@ -1751,14 +1813,14 @@ export default function App() {
   const loadMeta = useCallback(async (id: string) => {
     const [tbls, cols] = await Promise.all([
       invoke<TableInfo[]>("list_tables", { conn: id }),
-      invoke<[string, string, string][]>("list_all_columns", { conn: id }),
+      invoke<[string, string, string, string][]>("list_all_columns", { conn: id }),
     ]);
     const map: Record<string, string[]> = {};
     for (const [s, t, c] of cols) {
       (map[`${s}.${t}`] ??= []).push(c);
       (map[t] ??= []).push(c);
     }
-    setLive((l) => ({ ...l, [id]: { tables: tbls, schema: map } }));
+    setLive((l) => ({ ...l, [id]: { tables: tbls, schema: map, cols } }));
   }, []);
 
   const refresh = useCallback(async () => {
@@ -2282,6 +2344,60 @@ export default function App() {
     }
   }, [csvJob, activeConn, say]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(AI_KEY, JSON.stringify(ai));
+    } catch {
+      /* เก็บไม่ได้ก็ใช้ค่าเดิมต่อ */
+    }
+  }, [ai]);
+
+  /* AI เขียน SQL แล้วพิมพ์ทับ editor ของแท็บนี้ทีละก้อน — ไม่รันให้ ผู้ใช้อ่านแล้วกด Run เอง
+     ส่งโครงสร้าง DB (ไม่มีข้อมูลในตาราง) + SQL ที่อยู่ใน editor ไปด้วย จะได้สั่งแก้ต่อได้ */
+  const genSql = useCallback(async () => {
+    const ask = aiAsk.trim();
+    if (!tab || !ask || aiBusy) return;
+    // แท็บที่เปิดไว้ก่อนเชื่อมต่อยังไม่ผูก connection — ใช้ตัวที่เลือกอยู่แทน
+    const connId = tab.conn || activeConn;
+    const meta = live[connId];
+    const engine = conns.find((c) => c.id === connId)?.engine ?? "postgres";
+    const before = tab.sql;
+    const prompt = [
+      meta
+        ? `Database schema (${meta.tables.length} tables, one per line as schema.table(column type, ...)):\n${schemaText(meta)}`
+        : "No database is connected, so the schema is unknown.",
+      before.trim() ? `SQL currently in the editor:\n${before}` : "",
+      `Request: ${ask}`,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+
+    setAiBusy(true);
+    setAiErr("");
+    let raw = "";
+    const unlisten = await listen<string>("ai-delta", (e) => {
+      raw += e.payload;
+      patch(tab.id, { sql: tidySql(raw) });
+    });
+    try {
+      const sql = await invoke<string>("ai_sql", {
+        system: aiSystem(engine),
+        prompt,
+        model: ai.model,
+        effort: ai.effort,
+      });
+      patch(tab.id, { sql: tidySql(sql).trimEnd() + "\n" });
+      setAiAsk("");
+    } catch (e) {
+      // หยุดกลางคัน / error: ครึ่ง ๆ กลาง ๆ ใช้ไม่ได้ คืน SQL เดิม
+      patch(tab.id, { sql: before });
+      setAiErr(String(e));
+    } finally {
+      unlisten();
+      setAiBusy(false);
+    }
+  }, [aiAsk, aiBusy, tab, activeConn, live, conns, ai, patch]);
+
   /* ลากคลุมไว้ = รันเฉพาะที่คลุม, ไม่ได้คลุม = รันเฉพาะคำสั่งที่เคอร์เซอร์อยู่ */
   const runNow = useCallback(() => {
     if (!tab) return;
@@ -2310,6 +2426,9 @@ export default function App() {
       } else if (e.key.toLowerCase() === "n") {
         e.preventDefault();
         addTab();
+      } else if (e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setAiOpen(true);
       }
     };
     window.addEventListener("keydown", h);
@@ -2631,6 +2750,13 @@ export default function App() {
             <span style={{ opacity: 0.55 }}>Ctrl+↵</span>
           </button>
           <button
+            className={"btn sm" + (aiOpen ? " on" : "")}
+            onClick={() => setAiOpen((o) => !o)}
+            title="ให้ AI เขียน SQL จากคำอธิบาย (ใช้ claude CLI ที่ login ไว้ในเครื่อง)"
+          >
+            <Sparkle size={14} weight="duotone" /> AI <span style={{ opacity: 0.55 }}>Ctrl+K</span>
+          </button>
+          <button
             className="btn sm"
             onClick={openAddRow}
             disabled={!canAddRow}
@@ -2693,6 +2819,68 @@ export default function App() {
             editReason && <span style={{ color: "var(--dim)", fontSize: 12 }}>{editReason}</span>
           )}
         </div>
+
+        {aiOpen && (
+          <div className="aibar">
+            <Sparkle size={16} weight="duotone" className={aiBusy ? "aiicon busy" : "aiicon"} />
+            <input
+              autoFocus
+              value={aiAsk}
+              readOnly={aiBusy}
+              placeholder={
+                tab?.sql.trim()
+                  ? "บอกว่าอยากได้ข้อมูลอะไร หรือสั่งแก้ SQL ที่อยู่ใน editor…"
+                  : "บอกว่าอยากได้ข้อมูลอะไร เช่น meter ที่ active แต่ถูกลบไปแล้ว เรียงตาม CC"
+              }
+              onChange={(e) => setAiAsk(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") genSql();
+                if (e.key === "Escape") {
+                  e.stopPropagation();
+                  if (aiBusy) invoke("ai_cancel");
+                  else setAiOpen(false);
+                }
+              }}
+            />
+            <select
+              value={ai.model}
+              disabled={aiBusy}
+              onChange={(e) => setAi({ ...ai, model: e.target.value })}
+              title="โมเดล"
+            >
+              {AI_MODELS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+            <select
+              value={ai.effort}
+              disabled={aiBusy}
+              onChange={(e) => setAi({ ...ai, effort: e.target.value })}
+              title="effort — ยิ่งสูงยิ่งคิดนาน"
+            >
+              {AI_EFFORTS.map((x) => (
+                <option key={x} value={x}>
+                  {x}
+                </option>
+              ))}
+            </select>
+            {aiBusy ? (
+              <button className="btn sm" onClick={() => invoke("ai_cancel")} title="หยุด (Esc)">
+                <Stop size={13} weight="fill" /> หยุด
+              </button>
+            ) : (
+              <button className="btn primary sm" onClick={genSql} disabled={!aiAsk.trim()}>
+                เขียน SQL
+              </button>
+            )}
+            <button className="btn ghost sm" onClick={() => setAiOpen(false)} title="ปิด (Esc)">
+              <X size={13} />
+            </button>
+            {aiErr && <div className="aierr">{aiErr}</div>}
+          </div>
+        )}
 
         <div className="editor" style={{ height: editorH }}>
           <CodeMirror

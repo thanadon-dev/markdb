@@ -2109,3 +2109,48 @@ select:focus {
     animation-duration: 3s;
   }
 }
+
+/* ---------- AI เขียน SQL ---------- */
+
+.btn.on {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.aibar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+}
+
+.aibar input {
+  flex: 1;
+  min-width: 200px;
+  padding: 6px 10px;
+}
+
+.aibar select {
+  width: auto;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.aiicon {
+  color: #c4b5fd;
+  flex: none;
+}
+
+.aiicon.busy {
+  animation: blink 1s ease-in-out infinite;
+}
+
+.aierr {
+  flex-basis: 100%;
+  color: var(--red);
+  font-size: 12px;
+  user-select: text;
+}
