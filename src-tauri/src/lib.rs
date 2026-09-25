@@ -45,6 +45,81 @@ struct QueryResult {
     affected: u64,
     elapsed_ms: u128,
     truncated: bool,
+    /// DELETE ที่พิมพ์เองจาก editor: แถวที่ถูกลบ เก็บไว้ให้ประวัติย้อนกลับได้
+    deleted: Option<Deleted>,
+}
+
+#[derive(Serialize)]
+struct Deleted {
+    /// ชื่อตารางตามที่พิมพ์ใน DELETE
+    table: String,
+    /// ว่าง + partial = ลบเยอะเกินกว่าที่เก็บไว้
+    rows: Vec<serde_json::Value>,
+    partial: bool,
+}
+
+/// แถวที่ลบจาก editor ได้มากสุดเท่านี้ถึงจะเก็บไว้ย้อนกลับ — ประวัติอยู่ใน localStorage ซึ่งจำกัดขนาด
+const KEEP_DELETED: usize = 1000;
+
+/// `delete from t [alias] [where …]` คำสั่งเดียว → (ชื่อตารางตามที่พิมพ์, select * ที่ได้แถวชุดเดียวกัน)
+/// แบบที่มี using / returning / หลายคำสั่ง ไม่แตะ (ลบตามปกติ แต่ไม่เก็บไว้ย้อน)
+fn delete_select(sql: &str) -> Option<(String, String)> {
+    let s = sql.trim();
+    if s.contains(';') {
+        return None;
+    }
+    let lower = s.to_ascii_lowercase();
+    let mut words = lower.split_whitespace();
+    if words.next() != Some("delete") || words.next() != Some("from") {
+        return None;
+    }
+    if lower
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|w| w == "using" || w == "returning")
+    {
+        return None;
+    }
+    // ตัดคำว่า delete from ทิ้ง (lowercase ไม่เปลี่ยนตำแหน่ง byte จึงใช้ตำแหน่งจากตัวนั้นได้)
+    let from = lower.find("from")? + 4;
+    let rest = s[from..].trim_start();
+    let mut quoted = false;
+    let end = rest
+        .char_indices()
+        .find(|&(_, c)| {
+            if c == '"' {
+                quoted = !quoted;
+            }
+            !quoted && c.is_whitespace()
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(rest.len());
+    Some((rest[..end].to_string(), format!("select * from {}", rest)))
+}
+
+/// ลบใน transaction เดียวกับที่อ่านแถวเก็บไว้ — แถวที่เก็บคือแถวที่ถูกลบจริง
+async fn run_delete(p: &PgPool, sql: &str, table: String, select: &str) -> R<QueryResult> {
+    let t0 = Instant::now();
+    let mut tx = p.begin().await.map_err(err)?;
+    let found = sqlx::query(&format!("select * from ({}) _d limit {}", select, KEEP_DELETED + 1))
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(err)?;
+    let affected = (&mut *tx).execute(sql).await.map_err(err)?.rows_affected();
+    tx.commit().await.map_err(err)?;
+    let partial = found.len() > KEEP_DELETED;
+    let rows = if partial {
+        Vec::new()
+    } else {
+        found.iter().map(row_json).collect::<R<Vec<_>>>()?
+    };
+    Ok(QueryResult {
+        columns: Vec::new(),
+        rows: Vec::new(),
+        affected,
+        elapsed_ms: t0.elapsed().as_millis(),
+        truncated: false,
+        deleted: Some(Deleted { table, rows, partial }),
+    })
 }
 
 #[derive(Serialize)]
@@ -635,6 +710,31 @@ async fn insert_row(
     }
 }
 
+/// ใส่หลายแถวกลับใน transaction เดียว — ใช้ย้อน DELETE ที่พิมพ์จาก editor
+/// แถวไหนใส่ไม่ได้ (เช่น key ซ้ำเพราะมีคนใส่กลับไปแล้ว) ยกเลิกทั้งหมด
+#[tauri::command]
+async fn insert_rows(
+    table: String,
+    rows: Vec<Vec<KeyVal>>,
+    conn: String,
+    state: tauri::State<'_, AppState>,
+) -> R<u64> {
+    let p = pool(&state, &conn).await?;
+    let mut tx = p.begin().await.map_err(err)?;
+    let mut n = 0;
+    for r in &rows {
+        let sql = format!(
+            "insert into {} ({}) values ({})",
+            table,
+            r.iter().map(|v| ident(&v.column)).collect::<Vec<_>>().join(", "),
+            r.iter().map(|v| lit(&v.value)).collect::<Vec<_>>().join(", ")
+        );
+        n += (&mut *tx).execute(sql.as_str()).await.map_err(err)?.rows_affected();
+    }
+    tx.commit().await.map_err(err)?;
+    Ok(n)
+}
+
 /// ลบแถวผ่าน primary key — เงื่อนไขต้องตรงพอดี 1 แถว ไม่งั้น rollback
 /// คืนค่าทั้งแถวที่ลบไป (ทุกคอลัมน์ในตาราง ไม่ใช่เฉพาะที่ query บนจอ select มา)
 /// ให้ฝั่ง UI เก็บลงประวัติไว้ insert กลับได้ครบ
@@ -798,6 +898,9 @@ async fn run_query(sql: String, conn: String,
     if trimmed.is_empty() {
         return Err("ไม่มี SQL ให้รัน".into());
     }
+    if let Some((table, select)) = delete_select(&trimmed) {
+        return run_delete(&p, &trimmed, table, &select).await;
+    }
 
     // ดึงเกินมา 1 แถวเพื่อรู้ว่ามีต่ออีกไหม แล้วค่อยตัดทิ้ง
     let capped = wrappable(&trimmed);
@@ -848,6 +951,7 @@ async fn run_query(sql: String, conn: String,
         columns,
         rows,
         elapsed_ms: t0.elapsed().as_millis(),
+        deleted: None,
     })
 }
 
@@ -1442,6 +1546,7 @@ pub fn run() {
             table_props,
             update_cell,
             insert_row,
+            insert_rows,
             delete_row,
             table_op,
             run_query,
@@ -1478,6 +1583,51 @@ mod tests {
         assert!(!wrappable("WITH RECURSIVE t(n) AS (select 1 union all select n+1 from t where n < 5) select * from t"));
         assert!(!wrappable("with gone as (delete from t returning *) select * from gone"));
         assert!(wrappable("with x as (select updated_at from t) select * from x"));
+    }
+
+    #[test]
+    fn deletes_become_selects() {
+        let d = |s: &str| delete_select(s);
+        assert_eq!(
+            d("DELETE FROM \"public\".\"Meter Config\" WHERE \"Meter_ID\" = 999"),
+            Some((
+                "\"public\".\"Meter Config\"".into(),
+                "select * from \"public\".\"Meter Config\" WHERE \"Meter_ID\" = 999".into()
+            ))
+        );
+        assert_eq!(d("delete from t"), Some(("t".into(), "select * from t".into())));
+        assert_eq!(d("delete from t x where x.id = 1").unwrap().1, "select * from t x where x.id = 1");
+        assert_eq!(d("delete from t using u where t.id = u.id"), None);
+        assert_eq!(d("delete from t where id = 1 returning *"), None);
+        assert_eq!(d("delete from t; delete from u"), None);
+        assert_eq!(d("with x as (select 1) delete from t"), None);
+        assert_eq!(d("select * from t"), None);
+    }
+
+    /// MARKDB_TEST_PG=postgres://user:pass@host:port cargo test -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn delete_keeps_rows_for_undo() {
+        let base = std::env::var("MARKDB_TEST_PG").expect("ตั้ง MARKDB_TEST_PG ก่อน");
+        let p = PgPool::connect(&format!("{}/postgres", base)).await.unwrap();
+        p.execute("drop table if exists markdb_del_t; create table markdb_del_t (id int primary key, note text, ok bool)")
+            .await
+            .unwrap();
+        p.execute("insert into markdb_del_t values (1, 'a', true), (2, null, false), (3, 'o''b', null)")
+            .await
+            .unwrap();
+        let sql = "delete from markdb_del_t where id > 1";
+        let (table, select) = delete_select(sql).unwrap();
+        let r = run_delete(&p, sql, table, &select).await.unwrap();
+        assert_eq!(r.affected, 2);
+        let d = r.deleted.unwrap();
+        assert_eq!(d.table, "markdb_del_t");
+        assert!(!d.partial);
+        assert_eq!(d.rows.len(), 2);
+        assert_eq!(d.rows[1]["note"], serde_json::json!("o'b"));
+        let left: (i64,) = sqlx::query_as("select count(*) from markdb_del_t").fetch_one(&p).await.unwrap();
+        assert_eq!(left.0, 1);
+        p.execute("drop table markdb_del_t").await.unwrap();
     }
 
     #[test]

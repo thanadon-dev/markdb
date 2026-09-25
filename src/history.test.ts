@@ -91,3 +91,24 @@ test("ประวัติเรียงใหม่สุดขึ้นก�
   assert.equal(list.length, 300);
   assert.equal(list[0].id, "304");
 });
+
+test("DELETE จาก editor ย้อนด้วย insert ทุกแถวทีเดียว / ลบเยอะเกินย้อนไม่ได้", () => {
+  const e: Entry = {
+    ...base,
+    kind: "delete",
+    sql: "delete from t where id > 1",
+    count: 2,
+    rows: [
+      { id: "2", note: null },
+      { id: "3", note: "x" },
+    ],
+  };
+  const p = revertPlan(e);
+  assert.ok("cmd" in p && p.cmd === "insert_rows");
+  assert.deepEqual("args" in p && p.args.rows, [
+    [{ column: "id", value: "2" }, { column: "note", value: null }],
+    [{ column: "id", value: "3" }, { column: "note", value: "x" }],
+  ]);
+  const big = revertPlan({ ...e, rows: [], partial: true, count: 5000 });
+  assert.ok("reason" in big && big.reason.includes("5000"));
+});

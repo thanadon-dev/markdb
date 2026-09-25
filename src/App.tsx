@@ -7,6 +7,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { stmtAt, stmtRangeAt, targetTable } from "./sqlsplit";
+import { parseTail, quoteIdent, withTail } from "./sqltail";
 import * as hist from "./history";
 import { PostgreSQL, sql as sqlLang } from "@codemirror/lang-sql";
 import { createTheme } from "@uiw/codemirror-themes";
@@ -31,6 +32,10 @@ import {
   ArrowClockwise,
   ArrowCounterClockwise,
   ArrowsLeftRight,
+  EyeSlash,
+  SortAscending,
+  SortDescending,
+  SquaresFour,
   Sparkle,
   Stop,
   CheckCircle,
@@ -48,6 +53,7 @@ import {
   Info,
   CaretLeft,
   CaretRight,
+  CaretUp,
   Rows,
   Copy as CopyIcon,
   Eraser,
@@ -74,6 +80,8 @@ type QueryResult = {
   affected: number;
   elapsed_ms: number;
   truncated: boolean;
+  /** DELETE ที่พิมพ์จาก editor — แถวที่ถูกลบ (ว่าง + partial = เยอะเกินเก็บ) */
+  deleted?: { table: string; rows: Record<string, unknown>[]; partial: boolean } | null;
 };
 type Tab = {
   id: string;
@@ -84,6 +92,9 @@ type Tab = {
   res?: QueryResult;
   err?: string;
   running?: boolean;
+  /** คำสั่งที่รันแล้วได้ res นี้ — ใช้แบ่งหน้า / order by และโชว์ในสรุปผล */
+  ran?: string;
+  ranAt?: number;
 };
 type ColumnInfo = {
   name: string;
@@ -148,6 +159,11 @@ type Conn = {
 const CONNS_KEY = "markdb.conns";
 const TABS_KEY = "markdb.tabs";
 const AI_KEY = "markdb.ai";
+/* จำนวนแถวต่อหน้า — ใส่เป็น limit ใน SQL ที่ดับเบิลคลิกเปิดตาราง แล้วปรับได้จากแถบล่าง */
+const PAGE_SIZES = [5, 15, 25, 50, 100];
+const PAGE = 15;
+/* แบ่งหน้า/order by ได้เฉพาะ SELECT — explain/show ต่อ limit ท้ายไม่ได้ */
+const isSelect = (sql: string) => /^\s*(?:--[^\n]*\n\s*)*(select|with|table|values)\b/i.test(sql);
 const ROW_H = 28;
 const PORTS: Record<Engine, string> = { postgres: "5432", redshift: "5439" };
 
@@ -1148,6 +1164,8 @@ const Grid = memo(function Grid({
   onCopy,
   onSelect,
   onExportJson,
+  onOrder,
+  serverOrder,
 }: {
   res: QueryResult;
   pk: string[];
@@ -1158,6 +1176,10 @@ const Grid = memo(function Grid({
   onCopy: (text: string) => void;
   onSelect: (rows: number[]) => void;
   onExportJson: (rows: Record<string, unknown>[]) => void;
+  /** order by ฝั่ง server (แก้ SQL แล้วรันใหม่) — ไม่มี = ผลลัพธ์นี้แก้ SQL ไม่ได้ */
+  onOrder?: (col: string, dir: "asc" | "desc" | null) => void;
+  /** order by ที่อยู่ใน SQL ตอนนี้ ไว้โชว์ลูกศรที่หัวคอลัมน์ */
+  serverOrder?: string | null;
 }) {
   const parent = useRef<HTMLDivElement>(null);
   // cur ชี้ด้วย "ลำดับที่เห็นบนจอ" (index ใน order) ไม่ใช่ index จริงของแถว
@@ -1171,17 +1193,28 @@ const Grid = memo(function Grid({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [sort, setSort] = useState<{ col: string; dir: "asc" | "desc" } | null>(null);
-
-  const widths = useMemo(
-    () =>
-      res.columns.map((c) => {
-        const sample = res.rows
-          .slice(0, 40)
-          .reduce((m, r) => Math.max(m, cellText(r[c]).length), c.length);
-        return Math.min(440, Math.max(88, sample * 7.4 + 28));
-      }),
-    [res],
+  // ลำดับ/ซ่อนคอลัมน์ที่ผู้ใช้ลากสลับ — อยู่แค่ในผลลัพธ์นี้ รันใหม่หรือเปิดแอปใหม่ก็กลับเป็นเหมือนเดิม
+  const [colOrder, setColOrder] = useState<string[] | null>(null);
+  const [hidden, setHidden] = useState<Set<string>>(() => new Set());
+  const [headMenu, setHeadMenu] = useState<{ x: number; y: number; col: string } | null>(null);
+  const [colDrag, setColDrag] = useState<{ col: string; over: string | null } | null>(null);
+  const colDown = useRef<{ col: string; x: number } | null>(null);
+  const cols = useMemo(
+    () => (colOrder ?? res.columns).filter((c) => !hidden.has(c)),
+    [colOrder, hidden, res.columns],
   );
+
+  const widthOf = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const c of res.columns) {
+      const sample = res.rows
+        .slice(0, 40)
+        .reduce((w, r) => Math.max(w, cellText(r[c]).length), c.length);
+      m[c] = Math.min(440, Math.max(88, sample * 7.4 + 28));
+    }
+    return m;
+  }, [res]);
+  const widths = useMemo(() => cols.map((c) => widthOf[c]), [cols, widthOf]);
   const template = useMemo(() => widths.map((w) => `${w}px`).join(" "), [widths]);
 
   /* เรียงลำดับฝั่ง client บน "ลำดับ index" ไม่ใช่ตัว rows — index เดิมจึงยังใช้อ้าง
@@ -1213,6 +1246,8 @@ const Grid = memo(function Grid({
     setMark(null);
     setEditing(false);
     setSel(new Set());
+    setColOrder(null);
+    setHidden(new Set());
   }, [res.columns]);
 
   // ปล่อยเมาส์นอกตารางก็ต้องจบการลาก ไม่งั้นค้างคลุมตามเมาส์ต่อ
@@ -1235,7 +1270,7 @@ const Grid = memo(function Grid({
     );
 
   const clampR = (r: number) => Math.max(0, Math.min(order.length - 1, r));
-  const clampC = (c: number) => Math.max(0, Math.min(res.columns.length - 1, c));
+  const clampC = (c: number) => Math.max(0, Math.min(cols.length - 1, c));
 
   // แถวที่อยู่ในช่วงที่คลุม ส่งให้ toolbar ด้วย — Delete row / คลิกขวา copy จะได้ตรงกับที่เห็น
   const selectRows = (a: number, b: number) => {
@@ -1256,14 +1291,93 @@ const Grid = memo(function Grid({
   };
 
   /* ขยายช่วงจาก mark เดิมไปถึงช่องใหม่ — ใช้ทั้ง shift+click, shift+ลูกศร และลากเมาส์ */
-  const extendTo = (r: number, c: number) => {
+  const extendTo = (r: number, c: number, scroll = true) => {
     if (!order.length) return;
     const rr = clampR(r);
     const cc = clampC(c);
+    if (!scroll && cur?.r === rr && cur.c === cc) return;
     setCur({ r: rr, c: cc });
     selectRows(mark?.r ?? rr, rr);
-    rv.scrollToIndex(rr);
+    if (scroll) rv.scrollToIndex(rr);
   };
+
+  /* ลากคลุมแล้วเมาส์ชิดขอบ/ออกนอกตาราง: เลื่อนตารางไปเรื่อย ๆ และขยายช่วงตาม
+     ยิ่งห่างขอบยิ่งเลื่อนเร็ว — แถวที่ยังไม่ render จะโผล่ขึ้นมาเองตอนเลื่อน */
+  const extendRef = useRef(extendTo);
+  extendRef.current = extendTo;
+  useEffect(() => {
+    let raf = 0;
+    let pt: { x: number; y: number } | null = null;
+    const tick = () => {
+      raf = 0;
+      const el = parent.current;
+      if (!dragging.current || !pt || !el) return;
+      const r = el.getBoundingClientRect();
+      const top = r.top + ((el.querySelector(".grid-head") as HTMLElement | null)?.offsetHeight ?? 0);
+      const edge = 28;
+      const speed = (d: number) => Math.min(28, Math.ceil(d / 3));
+      let dy = 0;
+      let dx = 0;
+      if (pt.y < top + edge) dy = -speed(top + edge - pt.y);
+      else if (pt.y > r.bottom - edge) dy = speed(pt.y - (r.bottom - edge));
+      if (pt.x < r.left + edge) dx = -speed(r.left + edge - pt.x);
+      else if (pt.x > r.right - edge) dx = speed(pt.x - (r.right - edge));
+      if (!dx && !dy) return;
+      el.scrollTop += dy;
+      el.scrollLeft += dx;
+      const x = Math.min(Math.max(pt.x, r.left + 4), r.right - 4);
+      const y = Math.min(Math.max(pt.y, top + 4), r.bottom - 4);
+      const cell = document.elementFromPoint(x, y)?.closest("[data-r]") as HTMLElement | null;
+      if (cell) extendRef.current(Number(cell.dataset.r), Number(cell.dataset.c), false);
+      raf = requestAnimationFrame(tick);
+    };
+    const move = (e: MouseEvent) => {
+      if (!dragging.current) return;
+      pt = { x: e.clientX, y: e.clientY };
+      if (!raf) raf = requestAnimationFrame(tick);
+    };
+    window.addEventListener("mousemove", move);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      cancelAnimationFrame(raf);
+    };
+  }, []);
+
+  /* ลากหัวคอลัมน์ไปวางที่คอลัมน์อื่น — ใช้เมาส์เอง ไม่ใช้ HTML5 drag
+     (Tauri บน Windows ดัก drag ของ OS ไว้ทำ file drop ทำให้ HTML5 drag ใช้ไม่ได้) */
+  const moveCol = (from: string, to: string) => {
+    const all = colOrder ?? res.columns;
+    const rest = all.filter((c) => c !== from);
+    const ti = rest.indexOf(to);
+    rest.splice(all.indexOf(from) < all.indexOf(to) ? ti + 1 : ti, 0, from);
+    setColOrder(rest);
+    setCur(null);
+    setMark(null);
+  };
+  useEffect(() => {
+    const move = (e: MouseEvent) => {
+      const d = colDown.current;
+      if (!d) return;
+      if (!colDrag && Math.abs(e.clientX - d.x) < 5) return;
+      const over = (
+        document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-col]") as HTMLElement | null
+      )?.dataset.col;
+      setColDrag({ col: d.col, over: over && over !== d.col ? over : null });
+    };
+    const up = () => {
+      colDown.current = null;
+      if (!colDrag) return;
+      if (colDrag.over) moveCol(colDrag.col, colDrag.over);
+      // ปล่อยไว้หนึ่งจังหวะ ให้ click ที่ตามมาหลังปล่อยเมาส์รู้ว่าเพิ่งลาก ไม่ใช่คลิกเรียง
+      setTimeout(() => setColDrag(null));
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+  });
 
   /* กดเมาส์ที่ช่อง: ธรรมดา = เริ่มคลุมใหม่, Shift = ขยายจากเดิม, Ctrl = สลับทีละแถว */
   const pick = (vr: number, ci: number, e: React.MouseEvent) => {
@@ -1296,21 +1410,21 @@ const Grid = memo(function Grid({
   /* ค่าในช่วงที่คลุม เป็น tab-separated — วางลง Excel ได้ตรงรูป */
   const rectTsv = () => {
     if (!rect) return "";
-    const cols = res.columns.slice(rect.c1, rect.c2 + 1);
+    const inRect = cols.slice(rect.c1, rect.c2 + 1);
     return order
       .slice(rect.r1, rect.r2 + 1)
-      .map((i) => cols.map((c) => copyText(res.rows[i][c])).join("\t"))
+      .map((i) => inRect.map((c) => copyText(res.rows[i][c])).join("\t"))
       .join("\n");
   };
 
   // เรียงตามที่เห็นบนจอ ไม่ใช่ตามลำดับที่คลิก — copy/export จะได้ตรงกับตา
   const picked = () => order.filter((i) => sel.has(i)).map((i) => res.rows[i]);
   const asTsv = (rows: Record<string, unknown>[]) =>
-    rows.map((r) => res.columns.map((c) => copyText(r[c])).join("\t")).join("\n");
+    rows.map((r) => cols.map((c) => copyText(r[c])).join("\t")).join("\n");
 
   const startEdit = (r: number, c: number, initial?: string) => {
     if (!editable) return;
-    const v = res.rows[order[r]][res.columns[c]];
+    const v = res.rows[order[r]][cols[c]];
     setCur({ r, c });
     setDraft(initial ?? (v === null || v === undefined ? "" : cellText(v)));
     setEditing(true);
@@ -1321,13 +1435,13 @@ const Grid = memo(function Grid({
   const commit = (move: 1 | 2) => {
     if (!cur) return;
     const ri = order[cur.r];
-    const col = res.columns[cur.c];
+    const col = cols[cur.c];
     setEditing(false);
     parent.current?.focus();
     if (draft !== cellText(res.rows[ri][col]))
       onEdit(ri, col, draft.toUpperCase() === "NULL" ? null : draft);
     if (mode === "record")
-      setCur({ r: cur.r, c: Math.min(res.columns.length - 1, cur.c + 1) });
+      setCur({ r: cur.r, c: Math.min(cols.length - 1, cur.c + 1) });
     else moveTo(move === 1 ? cur.r + 1 : cur.r, move === 2 ? cur.c + 1 : cur.c);
   };
 
@@ -1390,27 +1504,17 @@ const Grid = memo(function Grid({
       // Ctrl+A คลุมทั้งผลลัพธ์
       e.preventDefault();
       setMark({ r: 0, c: 0 });
-      setCur({ r: order.length - 1, c: res.columns.length - 1 });
+      setCur({ r: order.length - 1, c: cols.length - 1 });
       selectRows(0, order.length - 1);
     } else if ((e.ctrlKey || e.metaKey) && k.toLowerCase() === "c") {
       e.preventDefault();
-      onCopy(manyCells ? rectTsv() : copyText(res.rows[order[cur.r]][res.columns[cur.c]]));
+      onCopy(manyCells ? rectTsv() : copyText(res.rows[order[cur.r]][cols[cur.c]]));
     } else if (k.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
       // พิมพ์ตัวอักษรทับได้เลยแบบสเปรดชีต ไม่ต้องดับเบิลคลิกก่อน
       e.preventDefault();
       startEdit(cur.r, cur.c, k);
     }
   };
-
-  if (!res.columns.length)
-    return (
-      <div className="empty">
-        <Lightning size={30} weight="duotone" />
-        <div>
-          สำเร็จ — กระทบ <b>{res.affected}</b> แถว ({res.elapsed_ms} ms)
-        </div>
-      </div>
-    );
 
   /* โหมด record — หนึ่งแถว คอลัมน์เรียงลงมา ใช้ cur ตัวเดียวกับ grid
      สลับโหมดไปมาจึงยังยืนอยู่ที่แถวเดิม */
@@ -1441,7 +1545,7 @@ const Grid = memo(function Grid({
               r: vr,
               c: Math.max(
                 0,
-                Math.min(res.columns.length - 1, (cur?.c ?? 0) + (e.key === "ArrowDown" ? 1 : -1)),
+                Math.min(cols.length - 1, (cur?.c ?? 0) + (e.key === "ArrowDown" ? 1 : -1)),
               ),
             });
           } else if ((e.key === "Enter" || e.key === "F2") && cur) {
@@ -1468,7 +1572,7 @@ const Grid = memo(function Grid({
           <div className="nomatch">{filter ? `ไม่มีแถวที่ตรงกับ “${filter}”` : "ไม่มีแถว"}</div>
         ) : (
           <div className="rec-body">
-            {res.columns.map((c, ci) => (
+            {cols.map((c, ci) => (
               <div key={c} className={"rec-row" + (cur?.c === ci ? " on" : "")}>
                 <div className={"rec-name" + (pk.includes(c) ? " pk" : "")}>
                   {pk.includes(c) ? `🔑 ${c}` : c}
@@ -1498,17 +1602,38 @@ const Grid = memo(function Grid({
   return (
     <div className="result grid" ref={parent} tabIndex={0} onKeyDown={onKey}>
       <div className="grid-head" style={{ gridTemplateColumns: template }}>
-        {res.columns.map((c) => (
-          <div
-            key={c}
-            className={(pk.includes(c) ? "pk" : "") + (sort?.col === c ? " sorted" : "")}
-            title={`${c} — คลิกเพื่อเรียง (น้อย→มาก, มาก→น้อย, ยกเลิก)`}
-            onClick={() => cycleSort(c)}
-          >
-            {pk.includes(c) ? `🔑 ${c}` : c}
-            {sort?.col === c && <i>{sort.dir === "asc" ? "▲" : "▼"}</i>}
-          </div>
-        ))}
+        {cols.map((c) => {
+          const srv =
+            serverOrder === `${quoteIdent(c)} asc` ? "▲" : serverOrder === `${quoteIdent(c)} desc` ? "▼" : "";
+          return (
+            <div
+              key={c}
+              data-col={c}
+              className={
+                (pk.includes(c) ? "pk" : "") +
+                (sort?.col === c || srv ? " sorted" : "") +
+                (colDrag?.col === c ? " dragging" : "") +
+                (colDrag?.over === c ? " dropto" : "")
+              }
+              title={`${c} — คลิก = เรียงในหน้านี้ · ลาก = ย้ายคอลัมน์ · คลิกขวา = order by และอื่น ๆ`}
+              onMouseDown={(e) => {
+                if (e.button === 0) colDown.current = { col: c, x: e.clientX };
+              }}
+              onClick={() => !colDrag && cycleSort(c)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setHeadMenu({ x: e.clientX, y: e.clientY, col: c });
+              }}
+            >
+              {pk.includes(c) ? `🔑 ${c}` : c}
+              {sort?.col === c ? (
+                <i>{sort.dir === "asc" ? "▲" : "▼"}</i>
+              ) : (
+                srv && <i title="order by ใน SQL">{srv}</i>
+              )}
+            </div>
+          );
+        })}
       </div>
       {!order.length && <div className="nomatch">ไม่มีแถวที่ตรงกับ “{filter}”</div>}
       <div className="grid-body" style={{ height: rv.getTotalSize() }}>
@@ -1539,7 +1664,7 @@ const Grid = memo(function Grid({
                 setMenu({ x: e.clientX, y: e.clientY });
               }}
             >
-              {res.columns.map((c, ci) => {
+              {cols.map((c, ci) => {
                 const here = cur?.r === vi.index && cur.c === ci;
                 if (here && editing) return editBox(c);
                 const inR =
@@ -1552,6 +1677,8 @@ const Grid = memo(function Grid({
                 return (
                   <div
                     key={c}
+                    data-r={vi.index}
+                    data-c={ci}
                     className={
                       cellClass(row[c]) + (here ? " picked" : "") + (inR ? " inrange" : "")
                     }
@@ -1570,8 +1697,6 @@ const Grid = memo(function Grid({
                       dragging.current = true;
                       pick(vi.index, ci, e);
                     }}
-                    // ponytail: ลากได้เฉพาะแถวที่ render อยู่ ไม่ auto-scroll ตอนลากพ้นขอบ
-                    // ต้องคลุมไกลกว่านั้นให้เลื่อนแล้ว shift+click ปลายทางแทน
                     onMouseEnter={() => dragging.current && extendTo(vi.index, ci)}
                     onDoubleClick={() =>
                       editable ? startEdit(vi.index, ci) : onCopy(copyText(row[c]))
@@ -1626,6 +1751,63 @@ const Grid = memo(function Grid({
           </div>
         </>
       )}
+
+      {headMenu && (
+        <>
+          <div
+            className="ctx-backdrop"
+            onMouseDown={() => setHeadMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setHeadMenu(null);
+            }}
+          />
+          <div className="ctxmenu" style={{ left: headMenu.x, top: headMenu.y }}>
+            <div className="ctxhead">{headMenu.col}</div>
+            {onOrder ? (
+              <>
+                <button onClick={() => (onOrder(headMenu.col, "asc"), setHeadMenu(null))}>
+                  <SortAscending size={14} weight="duotone" /> Order by น้อย → มาก
+                </button>
+                <button onClick={() => (onOrder(headMenu.col, "desc"), setHeadMenu(null))}>
+                  <SortDescending size={14} weight="duotone" /> Order by มาก → น้อย
+                </button>
+                {serverOrder && (
+                  <button onClick={() => (onOrder(headMenu.col, null), setHeadMenu(null))}>
+                    <X size={14} /> เอา order by ออก
+                  </button>
+                )}
+              </>
+            ) : (
+              <div className="ctxnote">order by ใช้ได้กับ SELECT ที่รันจาก editor</div>
+            )}
+            <div className="ctxsep" />
+            <button onClick={() => (onCopy(headMenu.col), setHeadMenu(null))}>
+              <Copy size={14} weight="duotone" /> Copy ชื่อคอลัมน์
+            </button>
+            <button
+              onClick={() => (
+                onCopy(order.map((i) => copyText(res.rows[i][headMenu.col])).join("\n")), setHeadMenu(null)
+              )}
+            >
+              <Copy size={14} weight="duotone" /> Copy ค่าทั้งคอลัมน์ ({order.length.toLocaleString()} แถว)
+            </button>
+            <button
+              disabled={cols.length <= 1}
+              onClick={() => (
+                setHidden(new Set([...hidden, headMenu.col])), setCur(null), setMark(null), setHeadMenu(null)
+              )}
+            >
+              <EyeSlash size={14} weight="duotone" /> ซ่อนคอลัมน์นี้
+            </button>
+            {(hidden.size > 0 || colOrder) && (
+              <button onClick={() => (setHidden(new Set()), setColOrder(null), setHeadMenu(null))}>
+                <ArrowCounterClockwise size={14} weight="duotone" /> คืนคอลัมน์ทั้งหมดตามเดิม
+              </button>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 });
@@ -1666,6 +1848,7 @@ export default function App() {
   const [logOpen, setLogOpen] = useState(false);
   const [logSel, setLogSel] = useState<string | null>(null);
   const [clearArm, setClearArm] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [mode, setMode] = useState<"grid" | "record">("grid");
   const [selRows, setSelRows] = useState<number[]>([]);
   const [confirmDel, setConfirmDel] = useState<Record<string, unknown> | null>(null);
@@ -1784,6 +1967,7 @@ export default function App() {
   useEffect(() => {
     const onEsc = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      if (toolsOpen) return setToolsOpen(false);
       if (tblMenu) return setTblMenu(null);
       if (logOpen) return setLogOpen(false);
       if (danger) return setDanger(null);
@@ -1800,7 +1984,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
-  }, [tblMenu, logOpen, danger, addRow, confirmDel, restoreFile, csvJob, syncOpen, busy, props, exportOpen, erOpen, form, updatesOpen, pct]);
+  }, [toolsOpen, tblMenu, logOpen, danger, addRow, confirmDel, restoreFile, csvJob, syncOpen, busy, props, exportOpen, erOpen, form, updatesOpen, pct]);
 
   useEffect(() => hist.save(log), [log]);
 
@@ -1874,18 +2058,39 @@ export default function App() {
       patch(id, { running: true, err: undefined });
       try {
         const res = await invoke<QueryResult>("run_query", { conn: c, sql: sqlText });
-        patch(id, { res, running: false });
+        patch(id, { res, running: false, ran: sqlText.trim(), ranAt: Date.now() });
+        // DELETE ที่พิมพ์เอง: เก็บแถวที่ถูกลบลงประวัติ ย้อนกลับได้เหมือนลบจากตาราง
+        const d = res.deleted;
+        if (d && res.affected > 0)
+          setLog((l) =>
+            hist.add(l, {
+              id: uid(),
+              at: Date.now(),
+              conn: c,
+              connName: conns.find((x) => x.id === c)?.name ?? "",
+              table: d.table,
+              kind: "delete",
+              sql: sqlText.trim(),
+              count: res.affected,
+              partial: d.partial,
+              rows: d.rows.map((r) =>
+                Object.fromEntries(
+                  Object.entries(r).map(([k, v]) => [k, v === null || v === undefined ? null : cellText(v)]),
+                ),
+              ),
+            }),
+          );
       } catch (e) {
         patch(id, { err: String(e), running: false, res: undefined });
       }
     },
-    [tabs, live, activeConn, patch, say],
+    [tabs, live, activeConn, conns, patch, say],
   );
 
   const openTable = useCallback(
     (t: TableInfo, exec = true) => {
       const src = qname(t);
-      const q = `select *\nfrom ${src}\nlimit 500;`;
+      const q = `select *\nfrom ${src}\nlimit ${PAGE};`;
       const nt = newTab(activeConn, { title: t.name, sql: q, source: src });
       setTabs((ts) => [...ts, nt]);
       setActiveTab(nt.id);
@@ -1926,7 +2131,7 @@ export default function App() {
       await invoke("insert_row", { conn: tab.conn, table: target, values });
       setAddRow(null);
       say("เพิ่มแถวแล้ว");
-      run(tab.id, tab.sql);
+      if (tab.ran && isSelect(tab.ran)) run(tab.id, tab.ran);
     } catch (e) {
       say(String(e));
     }
@@ -2031,7 +2236,9 @@ export default function App() {
         });
         setLogSel(null);
         say("ย้อนกลับแล้ว");
-        if (tab && tab.conn === e.conn && tab.sql) run(tab.id, tab.sql);
+        // รีเฟรชผลลัพธ์บนจอ — รันซ้ำเฉพาะ SELECT ที่เพิ่งรัน ไม่ใช่ทั้ง editor
+        // (ถ้า editor ยังมี DELETE ที่เพิ่งย้อนอยู่ จะกลายเป็นลบซ้ำทันที)
+        if (tab && tab.conn === e.conn && tab.ran && isSelect(tab.ran)) run(tab.id, tab.ran);
       } catch (err) {
         say(String(err));
       } finally {
@@ -2078,7 +2285,7 @@ export default function App() {
       logIt({ kind: "delete", table: target, row, keys, partial: !full }, tab.conn);
       say("ลบแถวแล้ว");
       setSelRows([]);
-      run(tab.id, tab.sql);
+      if (tab.ran && isSelect(tab.ran)) run(tab.id, tab.ran);
     } catch (e) {
       say(String(e));
     }
@@ -2508,6 +2715,45 @@ export default function App() {
     ];
   }, [schema, ctx.schema, ctx.table, tabConn]);
 
+  const openHistory = () => {
+    setClearArm(false);
+    setLogSel(null);
+    setLogOpen(true);
+  };
+  const hasUndo = log.some((e) => !e.undone && e.kind !== "drop" && e.kind !== "truncate");
+
+  /* แบ่งหน้า / order by: แก้ส่วนท้ายของคำสั่งที่เพิ่งรัน เขียนกลับลง editor ให้เห็นว่ารันอะไร แล้วรันใหม่ */
+  const tail = tab?.res?.columns.length && tab.ran && isSelect(tab.ran) ? parseTail(tab.ran) : null;
+  const rerunTail = (change: Parameters<typeof withTail>[1]) => {
+    if (!tab?.ran) return;
+    const next = withTail(tab.ran, change);
+    if (!next) return;
+    const ran = tab.ran;
+    if (tab.sql.includes(ran)) patch(tab.id, { sql: tab.sql.replace(ran, () => next) });
+    run(tab.id, next);
+  };
+  const orderBy = (col: string, dir: "asc" | "desc" | null) =>
+    rerunTail({ order: dir ? `${quoteIdent(col)} ${dir}` : null, offset: null });
+
+  // เมนูเครื่องมือมุมซ้ายล่าง — ปุ่มใหม่ในอนาคตเพิ่มในรายการนี้ที่เดียว
+  const tools = [
+    { label: "Import", hint: "นำเข้า CSV / รันไฟล์ SQL", icon: UploadSimple, run: importFile, off: !connected },
+    { label: "Export", hint: "ส่งออกผลลัพธ์บนจอ", icon: DownloadSimple, run: () => setExportOpen(true), off: !tab?.res },
+    { label: "History", hint: "ประวัติแก้ไข / ลบ — ย้อนกลับได้", icon: ClockCounterClockwise, run: openHistory, off: false, dot: hasUndo },
+    { label: "Backup", hint: "dump ทั้ง database เป็นไฟล์ .sql", icon: FloppyDisk, run: backup, off: !connected },
+    { label: "Restore", hint: "รันไฟล์ .sql กลับเข้า database นี้", icon: ArrowCounterClockwise, run: pickRestore, off: !connected },
+    {
+      label: "Sync",
+      hint: "ทำให้ตารางใน DB อื่นเหมือนตัวนี้",
+      icon: ArrowsLeftRight,
+      run: () =>
+        conns.filter((c) => live[c.id]).length < 2
+          ? say("ต้องเชื่อมต่ออย่างน้อย 2 connection (ต้นทางกับปลายทาง) ก่อน")
+          : setSyncOpen(true),
+      off: !connected,
+    },
+  ];
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -2643,58 +2889,40 @@ export default function App() {
 
         <div className="side-foot">
           <button
-            className="btn sm"
-            onClick={importFile}
-            disabled={!connected}
-            title="นำเข้า CSV/SQL"
+            className={"btn sm toolsbtn" + (toolsOpen ? " on" : "")}
+            onClick={() => setToolsOpen((o) => !o)}
+            title="Import, Export, History, Backup, Restore, Sync"
           >
-            <UploadSimple size={15} weight="duotone" /> Import
+            <SquaresFour size={15} weight="duotone" /> เครื่องมือ
+            {hasUndo && <em className="dot" />}
+            <CaretUp size={12} className={toolsOpen ? "flip" : ""} style={{ marginLeft: "auto" }} />
           </button>
-          <button className="btn sm" onClick={() => setExportOpen(true)} disabled={!tab?.res}>
-            <DownloadSimple size={15} weight="duotone" /> Export
-          </button>
-          <button
-            className="btn sm"
-            onClick={() => {
-              setClearArm(false);
-              setLogSel(null);
-              setLogOpen(true);
-            }}
-            title="ประวัติการแก้ไข / ลบ ที่ทำจากเครื่องนี้"
-          >
-            <ClockCounterClockwise size={15} weight="duotone" /> History
-            {log.some((e) => !e.undone && e.kind !== "drop" && e.kind !== "truncate") && (
-              <em className="dot" />
-            )}
-          </button>
-          <button
-            className="btn sm"
-            onClick={backup}
-            disabled={!connected}
-            title="dump ทั้ง database เป็นไฟล์ .sql"
-          >
-            <FloppyDisk size={15} weight="duotone" /> Backup
-          </button>
-          <button
-            className="btn sm"
-            onClick={pickRestore}
-            disabled={!connected}
-            title="รันไฟล์ .sql กลับเข้า database ที่เชื่อมต่ออยู่"
-          >
-            <ArrowCounterClockwise size={15} weight="duotone" /> Restore
-          </button>
-          <button
-            className="btn sm"
-            onClick={() =>
-              conns.filter((c) => live[c.id]).length < 2
-                ? say("ต้องเชื่อมต่ออย่างน้อย 2 connection (ต้นทางกับปลายทาง) ก่อน")
-                : setSyncOpen(true)
-            }
-            disabled={!connected}
-            title="ทำให้ตารางใน database อีกตัวเหมือนกับตัวนี้ ทั้งโครงสร้างและข้อมูล"
-          >
-            <ArrowsLeftRight size={15} weight="duotone" /> Sync
-          </button>
+          {toolsOpen && (
+            <>
+              <div className="ctx-backdrop" onMouseDown={() => setToolsOpen(false)} />
+              <div className="toolsmenu">
+                {tools.map((t) => (
+                  <button
+                    key={t.label}
+                    disabled={t.off}
+                    onClick={() => {
+                      setToolsOpen(false);
+                      t.run();
+                    }}
+                  >
+                    <t.icon size={16} weight="duotone" />
+                    <span>
+                      <b>
+                        {t.label}
+                        {t.dot && <em className="dot" />}
+                      </b>
+                      <em>{t.hint}</em>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       </aside>
 
@@ -2907,6 +3135,38 @@ export default function App() {
           <div className="result">
             <div className="err">{tab.err}</div>
           </div>
+        ) : tab?.res && !tab.res.columns.length ? (
+          <div className="result">
+            <div className="donecard">
+              <div className="donehead">
+                <CheckCircle size={18} weight="fill" />
+                <b>สำเร็จ</b>
+                <span>
+                  กระทบ <b>{tab.res.affected.toLocaleString()}</b> แถว · {tab.res.elapsed_ms} ms ·{" "}
+                  {conns.find((c) => c.id === (tab.conn || activeConn))?.name}
+                  {tab.ranAt ? ` · ${new Date(tab.ranAt).toLocaleTimeString("th-TH")}` : ""}
+                </span>
+              </div>
+              {tab.res.deleted && tab.res.affected > 0 && (
+                <div className={"donenote" + (tab.res.deleted.partial ? " warnc" : "")}>
+                  {tab.res.deleted.partial
+                    ? `ลบ ${tab.res.affected.toLocaleString()} แถว — มากเกินกว่าที่เก็บไว้ย้อนกลับได้ (1,000 แถว)`
+                    : `เก็บ ${tab.res.deleted.rows.length.toLocaleString()} แถวที่ถูกลบไว้ใน History แล้ว — ย้อนกลับได้`}
+                  {!tab.res.deleted.partial && (
+                    <button className="btn sm" onClick={openHistory}>
+                      <ClockCounterClockwise size={13} weight="duotone" /> เปิด History
+                    </button>
+                  )}
+                </div>
+              )}
+              {tab.ran && (
+                <>
+                  <div className="donelabel">คำสั่งที่รัน</div>
+                  <pre className="donesql">{tab.ran}</pre>
+                </>
+              )}
+            </div>
+          </div>
         ) : tab?.res ? (
           <Grid
             res={tab.res}
@@ -2917,6 +3177,8 @@ export default function App() {
             onEdit={editCell}
             onSelect={setSelRows}
             onExportJson={(rows) => exportAs("json", rows)}
+            onOrder={tail ? orderBy : undefined}
+            serverOrder={tail?.order}
             onCopy={(txt) => {
               navigator.clipboard?.writeText(txt);
               say("คัดลอกแล้ว");
@@ -2964,6 +3226,58 @@ export default function App() {
               )}
               {tab.res.truncated && <span>ตัดที่ 5000 แถว</span>}
             </>
+          )}
+          {tail && tab?.res && (
+            <span className="pager">
+              <button
+                title="หน้าก่อน"
+                disabled={tab.running || !tail.limit || !tail.offset}
+                onClick={() => rerunTail({ offset: Math.max(0, (tail.offset ?? 0) - (tail.limit ?? 0)) || null })}
+              >
+                <CaretLeft size={12} weight="bold" />
+              </button>
+              <span>
+                {tab.res.rows.length
+                  ? `${((tail.offset ?? 0) + 1).toLocaleString()}–${((tail.offset ?? 0) + tab.res.rows.length).toLocaleString()}`
+                  : "0"}
+              </span>
+              <button
+                title="หน้าถัดไป"
+                disabled={tab.running || !tail.limit || tab.res.rows.length < tail.limit}
+                onClick={() => rerunTail({ offset: (tail.offset ?? 0) + (tail.limit ?? 0) })}
+              >
+                <CaretRight size={12} weight="bold" />
+              </button>
+              <select
+                value={tail.limit ?? "all"}
+                disabled={tab.running}
+                title="จำนวนแถวต่อหน้า (แก้ limit ใน SQL)"
+                onChange={(e) =>
+                  rerunTail(
+                    e.target.value === "all"
+                      ? { limit: null, offset: null }
+                      : { limit: Number(e.target.value), offset: null },
+                  )
+                }
+              >
+                {[...new Set([...PAGE_SIZES, ...(tail.limit !== null ? [tail.limit] : [])])]
+                  .sort((a, b) => a - b)
+                  .map((n) => (
+                    <option key={n} value={n}>
+                      {n} / หน้า
+                    </option>
+                  ))}
+                <option value="all">ทั้งหมด</option>
+              </select>
+              <button
+                className="all"
+                title="เอา limit ออก (สูงสุด 5,000 แถว)"
+                disabled={tab.running || tail.limit === null}
+                onClick={() => rerunTail({ limit: null, offset: null })}
+              >
+                แสดงทั้งหมด
+              </button>
+            </span>
           )}
           <span style={{ flex: 1 }} />
           {working && (
@@ -3330,6 +3644,7 @@ export default function App() {
                       <span className="ht">
                         {e.table}
                         {e.column ? <em>.{e.column}</em> : null}
+                        {e.sql ? <em> · {e.count?.toLocaleString()} แถว (SQL)</em> : null}
                       </span>
                       <span className="hw">
                         {e.undone ? "ย้อนแล้ว" : e.isRevert ? "เป็นการย้อน" : when(e.at)}
@@ -3366,6 +3681,45 @@ export default function App() {
                             <div className="dkeys">
                               {(e.keys ?? []).map((k) => `${k.column} = ${hist.show(k.value)}`).join("  ·  ")}
                             </div>
+                          </div>
+                        )}
+
+                        {e.kind === "delete" && e.sql && (
+                          <div className="diff">
+                            <pre className="donesql">{e.sql}</pre>
+                            {e.rows && e.rows.length > 0 && (
+                              <>
+                                <div className="drow ok">
+                                  <span className="dlab">แถวที่จะใส่กลับเข้าไป</span>
+                                  <span className="dval">{e.rows.length.toLocaleString()} แถว</span>
+                                </div>
+                                <div className="hrows">
+                                  <table className="csvprev">
+                                    <thead>
+                                      <tr>
+                                        {Object.keys(e.rows[0]).map((c) => (
+                                          <th key={c}>{c}</th>
+                                        ))}
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {e.rows.slice(0, 50).map((r, i) => (
+                                        <tr key={i}>
+                                          {Object.values(r).map((v, k) => (
+                                            <td key={k} className={v === null ? "isnull" : ""}>
+                                              {hist.show(v)}
+                                            </td>
+                                          ))}
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                  {e.rows.length > 50 && (
+                                    <p className="csvskip">แสดง 50 จาก {e.rows.length.toLocaleString()} แถว</p>
+                                  )}
+                                </div>
+                              </>
+                            )}
                           </div>
                         )}
 

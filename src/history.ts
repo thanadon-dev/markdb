@@ -21,8 +21,15 @@ export type Entry = {
   keys?: { column: string; value: Val }[];
   /** delete: ค่าทั้งแถวที่ถูกลบ */
   row?: Record<string, Val>;
-  /** delete: เก็บได้แค่คอลัมน์ที่ผลลัพธ์บนจอมี ไม่ใช่ทั้งตาราง */
+  /** delete: เก็บได้แค่คอลัมน์ที่ผลลัพธ์บนจอมี ไม่ใช่ทั้งตาราง
+      (DELETE จาก editor: ลบเยอะเกินกว่าที่เก็บไว้ — rows ว่าง ย้อนไม่ได้) */
   partial?: boolean;
+  /** DELETE ที่พิมพ์จาก editor: ทุกแถวที่ถูกลบ */
+  rows?: Record<string, Val>[];
+  /** DELETE ที่พิมพ์จาก editor: คำสั่งที่รัน */
+  sql?: string;
+  /** DELETE ที่พิมพ์จาก editor: จำนวนแถวที่ลบจริง */
+  count?: number;
   /** ย้อนกลับไปแล้ว */
   undone?: boolean;
   /** รายการนี้เกิดจากการกดย้อนกลับ */
@@ -30,7 +37,7 @@ export type Entry = {
 };
 
 export type Plan =
-  | { cmd: "update_cell" | "insert_row"; args: Record<string, unknown>; summary: string }
+  | { cmd: "update_cell" | "insert_row" | "insert_rows"; args: Record<string, unknown>; summary: string }
   | { reason: string };
 
 export const KEY = "markdb.history.v1";
@@ -68,6 +75,20 @@ export const revertPlan = (e: Entry): Plan => {
       cmd: "update_cell",
       args: { table: e.table, column: e.column, value: e.before ?? null, keys: e.keys },
       summary: `update ${e.table} set ${e.column} = ${show(e.before)}`,
+    };
+  }
+  if (e.kind === "delete" && e.sql) {
+    if (e.partial || !e.rows?.length)
+      return {
+        reason: `ลบไป ${e.count ?? "?"} แถว มากเกินกว่าที่เก็บไว้ย้อนกลับได้ (1,000 แถว) — ต้องกู้จากไฟล์ Backup`,
+      };
+    return {
+      cmd: "insert_rows",
+      args: {
+        table: e.table,
+        rows: e.rows.map((r) => Object.entries(r).map(([column, value]) => ({ column, value }))),
+      },
+      summary: `insert into ${e.table} กลับ ${e.rows.length} แถว (ใน transaction เดียว)`,
     };
   }
   if (e.kind === "delete") {
