@@ -181,10 +181,9 @@ struct ConnInfo {
 }
 
 #[tauri::command]
-async fn connect(url: String, conn: String,
+async fn connect(url: String, conn: String, readonly: Option<bool>,
     state: tauri::State<'_, AppState>) -> R<ConnInfo> {
-    let p = PgPoolOptions::new()
-        .max_connections(4)
+    let p = pool_options(readonly.unwrap_or(false))
         .connect(&url)
         .await
         .map_err(err)?;
@@ -197,6 +196,19 @@ async fn connect(url: String, conn: String,
     Ok(ConnInfo {
         version,
         engine: engine.name(),
+    })
+}
+
+/// อ่านอย่างเดียว: ให้ DB เองปฏิเสธทุกคำสั่งที่เขียน — ครอบทุกทางที่แอปเขียนได้ในที่เดียว
+/// ponytail: Redshift ไม่รองรับคำสั่งนี้ก็ข้ามไป เหลือแค่ด่านฝั่ง UI
+fn pool_options(ro: bool) -> PgPoolOptions {
+    PgPoolOptions::new().max_connections(4).after_connect(move |c, _| {
+        Box::pin(async move {
+            if ro {
+                let _ = c.execute("set session characteristics as transaction read only").await;
+            }
+            Ok(())
+        })
     })
 }
 
@@ -682,8 +694,8 @@ async fn insert_row(
     insert_one(&db(&state, &conn).await?, &table, &values).await
 }
 
-async fn insert_one(d: &Db, table: &str, values: &[KeyVal]) -> R<Option<serde_json::Value>> {
-    let sql = if values.is_empty() {
+fn insert_sql(table: &str, values: &[KeyVal]) -> String {
+    if values.is_empty() {
         format!("insert into {} default values", table)
     } else {
         format!(
@@ -692,7 +704,11 @@ async fn insert_one(d: &Db, table: &str, values: &[KeyVal]) -> R<Option<serde_js
             values.iter().map(|v| ident(&v.column)).collect::<Vec<_>>().join(", "),
             values.iter().map(|v| lit(&v.value)).collect::<Vec<_>>().join(", ")
         )
-    };
+    }
+}
+
+async fn insert_one(d: &Db, table: &str, values: &[KeyVal]) -> R<Option<serde_json::Value>> {
+    let sql = insert_sql(table, values);
     // คำสั่งเดียว autocommit ในตัว — พังก็ไม่มีอะไรถูกเขียน
     if d.engine == Engine::Postgres {
         let r = d.pool.fetch_one(format!("{} returning *", sql).as_str()).await.map_err(err)?;
@@ -703,29 +719,99 @@ async fn insert_one(d: &Db, table: &str, values: &[KeyVal]) -> R<Option<serde_js
     }
 }
 
-/// ใส่หลายแถวกลับใน transaction เดียว — ใช้ย้อน DELETE ที่พิมพ์จาก editor
-/// แถวไหนใส่ไม่ได้ (เช่น key ซ้ำเพราะมีคนใส่กลับไปแล้ว) ยกเลิกทั้งหมด
+/// ใส่หลายแถวใน transaction เดียว — ย้อน DELETE จาก editor และวางหลายแถวจาก Excel
+/// แถวไหนใส่ไม่ได้ (เช่น key ซ้ำ) ยกเลิกทั้งหมด
+/// Postgres คืนแถวที่บันทึกจริงทุกแถว (id ที่ DB สร้าง) — Redshift คืนว่าง
 #[tauri::command]
 async fn insert_rows(
     table: String,
     rows: Vec<Vec<KeyVal>>,
     conn: String,
     state: tauri::State<'_, AppState>,
-) -> R<u64> {
-    let p = pool(&state, &conn).await?;
-    let mut tx = p.begin().await.map_err(err)?;
-    let mut n = 0;
-    for r in &rows {
-        let sql = format!(
-            "insert into {} ({}) values ({})",
-            table,
-            r.iter().map(|v| ident(&v.column)).collect::<Vec<_>>().join(", "),
-            r.iter().map(|v| lit(&v.value)).collect::<Vec<_>>().join(", ")
-        );
-        n += (&mut *tx).execute(sql.as_str()).await.map_err(err)?.rows_affected();
+) -> R<Vec<serde_json::Value>> {
+    insert_many(&db(&state, &conn).await?, &table, &rows).await
+}
+
+async fn insert_many(d: &Db, table: &str, rows: &[Vec<KeyVal>]) -> R<Vec<serde_json::Value>> {
+    let pg = d.engine == Engine::Postgres;
+    let sqls: Vec<String> = rows
+        .iter()
+        .map(|r| insert_sql(table, r) + if pg { " returning *" } else { "" })
+        .collect();
+    let mut tx = d.pool.begin().await.map_err(err)?;
+    let mut saved = Vec::new();
+    for sql in &sqls {
+        if pg {
+            let r = (&mut *tx).fetch_one(sql.as_str()).await.map_err(err)?;
+            saved.push(row_json(&r)?);
+        } else {
+            (&mut *tx).execute(sql.as_str()).await.map_err(err)?;
+        }
     }
     tx.commit().await.map_err(err)?;
-    Ok(n)
+    Ok(saved)
+}
+
+/// ลบหลายแถวผ่าน key ใน transaction เดียว (ย้อนแถวที่วางเพิ่มจาก Excel)
+/// ทุกชุด key ต้องโดนพอดี 1 แถว ไม่งั้นยกเลิกทั้งหมด
+#[tauri::command]
+async fn delete_rows(
+    table: String,
+    keys: Vec<Vec<KeyVal>>,
+    conn: String,
+    state: tauri::State<'_, AppState>,
+) -> R<u64> {
+    let sqls: Vec<String> = keys
+        .iter()
+        .map(|k| format!("delete from {} where {}", table, where_keys(k)))
+        .collect();
+    exact_one_each(&db(&state, &conn).await?, &sqls, "ลบ").await
+}
+
+#[derive(Deserialize)]
+struct CellChange {
+    keys: Vec<KeyVal>,
+    column: String,
+    value: Option<String>,
+}
+
+/// แก้หลาย cell ใน transaction เดียว (วางทับจาก Excel) — ทุก cell ต้องโดนพอดี 1 แถว
+#[tauri::command]
+async fn update_cells(
+    table: String,
+    changes: Vec<CellChange>,
+    conn: String,
+    state: tauri::State<'_, AppState>,
+) -> R<u64> {
+    let sqls: Vec<String> = changes
+        .iter()
+        .map(|c| {
+            format!(
+                "update {} set {} = {} where {}",
+                table,
+                ident(&c.column),
+                lit(&c.value),
+                where_keys(&c.keys)
+            )
+        })
+        .collect();
+    exact_one_each(&db(&state, &conn).await?, &sqls, "แก้").await
+}
+
+async fn exact_one_each(d: &Db, sqls: &[String], verb: &str) -> R<u64> {
+    if sqls.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = d.pool.begin().await.map_err(err)?;
+    for (i, sql) in sqls.iter().enumerate() {
+        let n = (&mut *tx).execute(sql.as_str()).await.map_err(err)?.rows_affected();
+        if n != 1 {
+            tx.rollback().await.ok();
+            return Err(format!("รายการที่ {} ตรง {} แถว (ต้องเป็น 1) — ยกเลิกการ{}ทั้งหมด", i + 1, n, verb));
+        }
+    }
+    tx.commit().await.map_err(err)?;
+    Ok(sqls.len() as u64)
 }
 
 /// ลบแถวผ่าน primary key — เงื่อนไขต้องตรงพอดี 1 แถว ไม่งั้น rollback
@@ -1544,6 +1630,8 @@ pub fn run() {
             update_cell,
             insert_row,
             insert_rows,
+            delete_rows,
+            update_cells,
             delete_row,
             table_op,
             run_query,
@@ -1651,6 +1739,55 @@ mod tests {
         let n: (i64,) = sqlx::query_as("select count(*) from markdb_ins_t").fetch_one(&p).await.unwrap();
         assert_eq!(n.0, 1);
         p.execute("drop table markdb_ins_t").await.unwrap();
+    }
+
+    /// วางจาก Excel: insert หลายแถวได้แถวจริงคืน, แก้/ลบหลายแถวต้องโดนแถวละ 1 ไม่งั้นยกเลิกทั้งชุด
+    #[tokio::test]
+    #[ignore]
+    async fn bulk_insert_update_delete() {
+        let base = std::env::var("MARKDB_TEST_PG").expect("ตั้ง MARKDB_TEST_PG ก่อน");
+        let p = PgPool::connect(&format!("{}/postgres", base)).await.unwrap();
+        p.execute("drop table if exists markdb_bulk_t; create table markdb_bulk_t (id serial primary key, name text not null)")
+            .await
+            .unwrap();
+        let d = Db { pool: p.clone(), engine: Engine::Postgres };
+        let kv = |c: &str, v: Option<&str>| KeyVal { column: c.into(), value: v.map(|s| s.into()) };
+        let saved = insert_many(&d, "markdb_bulk_t", &[vec![kv("name", Some("a"))], vec![kv("name", Some("b"))]])
+            .await
+            .unwrap();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[1]["id"], serde_json::json!(2));
+        // แถวที่ 2 พัง → แถวแรกต้องไม่ถูกใส่
+        assert!(insert_many(&d, "markdb_bulk_t", &[vec![kv("name", Some("c"))], vec![kv("name", None)]]).await.is_err());
+        let count = || async { sqlx::query_as::<_, (i64,)>("select count(*) from markdb_bulk_t").fetch_one(&p).await.unwrap().0 };
+        assert_eq!(count().await, 2);
+
+        let upd = |id: &str, v: &str| format!("update markdb_bulk_t set name = '{}' where id = {}", v, id);
+        assert_eq!(exact_one_each(&d, &[upd("1", "x"), upd("2", "y")], "แก้").await.unwrap(), 2);
+        // id 99 ไม่มีจริง → rollback ทั้งชุด id 1 ต้องยังเป็น x
+        assert!(exact_one_each(&d, &[upd("1", "z"), upd("99", "q")], "แก้").await.is_err());
+        let n: (String,) = sqlx::query_as("select name from markdb_bulk_t where id = 1").fetch_one(&p).await.unwrap();
+        assert_eq!(n.0, "x");
+        p.execute("drop table markdb_bulk_t").await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn readonly_blocks_writes() {
+        let base = std::env::var("MARKDB_TEST_PG").expect("ตั้ง MARKDB_TEST_PG ก่อน");
+        let url = format!("{}/postgres", base);
+        let rw = PgPool::connect(&url).await.unwrap();
+        rw.execute("drop table if exists markdb_ro_t; create table markdb_ro_t (id int primary key)").await.unwrap();
+        let ro = pool_options(true).connect(&url).await.unwrap();
+        let e = ro.execute("insert into markdb_ro_t values (1)").await.unwrap_err().to_string();
+        assert!(e.contains("read-only"), "{}", e);
+        // ใน transaction ก็โดนเหมือนกัน (ทุกคำสั่งเขียนของแอปวิ่งผ่าน tx)
+        let mut tx = ro.begin().await.unwrap();
+        assert!((&mut *tx).execute("delete from markdb_ro_t").await.is_err());
+        drop(tx);
+        let n: (i64,) = sqlx::query_as("select count(*) from markdb_ro_t").fetch_one(&ro).await.unwrap();
+        assert_eq!(n.0, 0);
+        rw.execute("drop table markdb_ro_t").await.unwrap();
     }
 
     #[test]

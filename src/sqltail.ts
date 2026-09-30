@@ -13,8 +13,8 @@ export type Tail = {
 
 const KW = /^(order\s+by|limit|offset)\b/i;
 
-/* ตำแหน่งของ order by / limit / offset ที่อยู่ชั้นนอกสุด */
-const topLevel = (s: string) => {
+/* ตำแหน่งของ keyword (ค่าเริ่มต้น order by / limit / offset) ที่อยู่ชั้นนอกสุด */
+const topLevel = (s: string, kw = KW) => {
   const hits: { at: number; kw: string; len: number }[] = [];
   let depth = 0;
   for (let i = 0; i < s.length; i++) {
@@ -31,7 +31,7 @@ const topLevel = (s: string) => {
     } else if (c === "(") depth++;
     else if (c === ")") depth--;
     else if (depth === 0 && /\w/.test(c) && !/\w/.test(s[i - 1] ?? "")) {
-      const m = s.slice(i).match(KW);
+      const m = s.slice(i).match(kw);
       if (m) {
         hits.push({ at: i, kw: m[1].toLowerCase().replace(/\s+/, " "), len: m[0].length });
         i += m[0].length - 1;
@@ -80,3 +80,48 @@ export const withTail = (sql: string, patch: Partial<Omit<Tail, "head" | "semi">
 };
 
 export const quoteIdent = (c: string) => `"${c.replace(/"/g, '""')}"`;
+
+export type FilterOp = "eq" | "ne" | "null" | "notnull" | "like";
+
+const lit = (v: unknown) =>
+  typeof v === "number" || typeof v === "boolean"
+    ? String(v)
+    : `'${(typeof v === "string" ? v : JSON.stringify(v)).replace(/'/g, "''")}'`;
+
+/** เงื่อนไขจากค่าใน cell — like = มีคำนี้อยู่ (ไม่สนตัวเล็กใหญ่) */
+export const filterCond = (col: string, op: FilterOp, v: unknown) => {
+  const c = quoteIdent(col);
+  if (op === "null") return `${c} is null`;
+  if (op === "notnull") return `${c} is not null`;
+  if (op === "like") {
+    const t = (typeof v === "string" ? v : JSON.stringify(v)).replace(/[\\%_]/g, (m) => "\\" + m);
+    return `${c}::varchar ilike ${lit(`%${t}%`)}`;
+  }
+  return `${c} ${op === "eq" ? "=" : "<>"} ${lit(v)}`;
+};
+
+const CLAUSE = /^(where|group\s+by|having|window|union|except|intersect)\b/i;
+// select list ที่เป็นแค่ * หรือชื่อคอลัมน์ล้วน — ชื่อบนจอตรงกับชื่อจริง ใส่ where ตรง ๆ ได้
+const PLAIN = /^select\s+(distinct\s+)?(("[^"]*"|[\w.*]+)\s*,\s*)*("[^"]*"|[\w.*]+)\s+from\s/i;
+
+/** เพิ่มเงื่อนไขเข้า where ของ SELECT แล้วรีเซ็ต offset — null ถ้าส่วนท้ายอ่านไม่ออก
+    query ที่มี group by / union / alias → ห่อเป็น subquery แทน (ชื่อคอลัมน์บนจอยังใช้ได้) */
+export const addWhere = (sql: string, cond: string) => {
+  const t = parseTail(sql);
+  if (!t) return null;
+  const hits = topLevel(t.head, CLAUSE).map((h) => ({ ...h, kw: h.kw.split(/\s/)[0] }));
+  const plain = PLAIN.test(t.head.replace(/^\s*(--[^\n]*\n\s*)*/, "")) && hits.every((h) => h.kw === "where");
+  let head: string;
+  if (!plain) {
+    head = `select *\nfrom (\n${t.head}\n) _f\nwhere ${cond}`;
+  } else if (!hits.length) {
+    head = `${t.head}\nwhere ${cond}`;
+  } else {
+    const w = hits[0];
+    const body = t.head.slice(w.at + w.len).trim();
+    // มี or ชั้นนอกอยู่แล้ว ต้องครอบวงเล็บ ไม่งั้น and ใหม่ไปผูกกับแค่ท่อนท้าย
+    const hasOr = topLevel(body, /^(or)\b/i).length > 0;
+    head = `${t.head.slice(0, w.at)}where ${hasOr ? `(${body})` : body}\n  and ${cond}`;
+  }
+  return buildTail({ ...t, head, offset: null });
+};

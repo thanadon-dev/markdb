@@ -31,3 +31,20 @@ test("Tab เติมตามชนิดคอลัมน์", () => {
   assert.deepEqual(s("note", "text"), { hint: "NULL", fill: null });
   assert.deepEqual(s("name", "text", "", false), { hint: "text", fill: null });
 });
+
+test("อ่าน TSV จาก Excel", async () => {
+  const { parseTsv } = await import("./newrow.ts");
+  assert.deepEqual(parseTsv("a\tb\r\n1\t2\r\n"), [["a", "b"], ["1", "2"]]);
+  assert.deepEqual(parseTsv('"x\ty"\t"line1\nline2"\t"say ""hi"""\n'), [["x\ty", "line1\nline2", 'say "hi"']]);
+  assert.deepEqual(parseTsv("a\t\tc"), [["a", "", "c"]]);
+  assert.deepEqual(parseTsv('5" pipe\tz'), [['5" pipe', "z"]]);
+  assert.deepEqual(parseTsv("only"), [["only"]]);
+});
+
+test("วางทับ: ค่าเดียวเติมทั้งช่วง, หลายค่าวางจากมุม และตัดส่วนเกิน", async () => {
+  const { pasteCells } = await import("./newrow.ts");
+  const fill = pasteCells([["x"]], { r1: 0, c1: 1, r2: 1, c2: 2 }, 10, 5);
+  assert.deepEqual(fill, { cells: [{ r: 0, c: 1, v: "x" }, { r: 0, c: 2, v: "x" }, { r: 1, c: 1, v: "x" }, { r: 1, c: 2, v: "x" }], cut: 0 });
+  const block = pasteCells([["a", "b"], ["c", "d"]], { r1: 2, c1: 4, r2: 2, c2: 4 }, 3, 5);
+  assert.deepEqual(block, { cells: [{ r: 2, c: 4, v: "a" }], cut: 3 });
+});

@@ -2429,3 +2429,139 @@ select:focus {
   font-size: 12px;
   white-space: pre-wrap;
 }
+
+/* production / อ่านอย่างเดียว — เห็นชัดตลอดว่ากำลังยืนอยู่บน DB ไหน */
+.main.prod {
+  box-shadow: inset 0 3px 0 var(--red);
+}
+.envtag {
+  font-style: normal;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.envtag.prod,
+.envbadge.prod {
+  background: rgba(255, 107, 107, 0.16);
+  color: var(--red);
+}
+.envtag.ro,
+.envbadge.ro {
+  background: rgba(125, 211, 252, 0.14);
+  color: #7dd3fc;
+}
+.envbadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border-radius: var(--radius);
+  font-size: 11.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* ให้ AI แก้ SQL ที่ error */
+.errfix {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: -2px 12px 12px;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+/* ประวัติ SQL ที่รัน */
+.qsearch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--dim);
+}
+.qsearch input {
+  flex: 1;
+  border: 0;
+  background: none;
+  padding: 8px 0;
+}
+.qlist {
+  display: grid;
+  gap: 6px;
+  max-height: 52vh;
+  overflow: auto;
+  margin-top: 10px;
+}
+.qrow {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: default;
+}
+.qrow:hover {
+  background: var(--panel);
+}
+.qrow pre {
+  margin: 0 0 6px;
+  max-height: 4.6em;
+  overflow: hidden;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.qrow.bad pre {
+  color: #ffa8a8;
+}
+.qmeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  font-size: 11px;
+  color: var(--dim);
+}
+.qmeta .btn {
+  padding: 2px 8px;
+  opacity: 0;
+}
+.qmeta .btn:first-of-type {
+  margin-left: auto;
+}
+.qrow:hover .qmeta .btn {
+  opacity: 1;
+}
+.qerr {
+  color: var(--red);
+}
+
+/* ปุ่มยืนยันที่ต้องรอ 3 วินาที — แถบวิ่งเต็มปุ่มพอดีตอนกดได้ */
+.btn.hold {
+  position: relative;
+  overflow: hidden;
+  min-width: 118px;
+  justify-content: center;
+}
+.btn.hold.wait::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  width: 100%;
+  background: rgba(255, 255, 255, 0.85);
+  transform-origin: left;
+  animation: hold-fill var(--hold) linear forwards;
+}
+@keyframes hold-fill {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}

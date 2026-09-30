@@ -52,3 +52,64 @@ export const suggest = (c: ColMeta, now = new Date(), uuid = () => crypto.random
   }
   return { hint: c.nullable ? "NULL" : t, fill: null };
 };
+
+/* ข้อความที่ก๊อปจาก Excel / Google Sheets / MarkDB เอง: แถวคั่นด้วย newline คอลัมน์คั่นด้วย tab
+   ช่องที่มี tab / ขึ้นบรรทัด / " อยู่ข้างใน จะถูกครอบด้วย "…" และ " ข้างในเป็น "" */
+export const parseTsv = (text: string): string[][] => {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let i = 0;
+  const s = text.replace(/\r\n?/g, "\n");
+  while (i < s.length) {
+    const c = s[i];
+    if (c === '"' && cell === "") {
+      const m = /^"((?:[^"]|"")*)"(?=\t|\n|$)/.exec(s.slice(i));
+      if (m) {
+        cell = m[1].replace(/""/g, '"');
+        i += m[0].length;
+        continue;
+      }
+    }
+    if (c === "\t") {
+      row.push(cell);
+      cell = "";
+    } else if (c === "\n") {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+    } else cell += c;
+    i++;
+  }
+  if (cell !== "" || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows;
+};
+
+/** ช่องที่จะโดนวางทับ: ค่าเดียว + คลุมหลายช่อง = เติมทุกช่องที่คลุม (แบบ Excel)
+    นอกนั้นวางเริ่มที่มุมซ้ายบนของที่คลุม ส่วนที่เกินขอบตารางตัดทิ้ง */
+export const pasteCells = (
+  data: string[][],
+  box: { r1: number; c1: number; r2: number; c2: number },
+  rows: number,
+  cols: number,
+) => {
+  const out: { r: number; c: number; v: string }[] = [];
+  const one = data.length === 1 && data[0].length === 1;
+  const h = one ? box.r2 - box.r1 + 1 : data.length;
+  const w = one ? box.c2 - box.c1 + 1 : Math.max(...data.map((d) => d.length));
+  let cut = 0;
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      const v = one ? data[0][0] : data[y][x];
+      if (v === undefined) continue;
+      const r = box.r1 + y;
+      const c = box.c1 + x;
+      if (r >= rows || c >= cols) cut++;
+      else out.push({ r, c, v });
+    }
+  return { cells: out, cut };
+};

@@ -44,3 +44,35 @@ test("ส่วนท้ายที่อ่านไม่ออกไม่�
   assert.equal(parseTail("select * from t order by"), null);
   assert.equal(parseTail("select * from t limit all")?.limit, null);
 });
+
+test("กรองจาก cell: เพิ่ม where / and / ห่อ subquery", async () => {
+  const { addWhere, filterCond } = await import("./sqltail.ts");
+  assert.equal(filterCond("name", "eq", "o'b"), `"name" = 'o''b'`);
+  assert.equal(filterCond("id", "ne", 5), `"id" <> 5`);
+  assert.equal(filterCond("ok", "eq", true), `"ok" = true`);
+  assert.equal(filterCond("x", "null", null), `"x" is null`);
+  assert.equal(filterCond("n", "like", "50%_a"), String.raw`"n"::varchar ilike '%50\%\_a%'`);
+  assert.equal(filterCond("n", "like", String.raw`c:\x`), String.raw`"n"::varchar ilike '%c:\\x%'`);
+  assert.equal(
+    addWhere('select *\nfrom "public"."t"\nlimit 15 offset 30;', `"id" = 1`),
+    'select *\nfrom "public"."t"\nwhere "id" = 1\nlimit 15;',
+  );
+  assert.equal(
+    addWhere("select * from t where a = 1\norder by b\nlimit 5", `"c" = 2`),
+    'select * from t where a = 1\n  and "c" = 2\norder by b\nlimit 5',
+  );
+  assert.equal(
+    addWhere("select * from t where a = 1 or b = 2", `"c" = 2`),
+    'select * from t where (a = 1 or b = 2)\n  and "c" = 2',
+  );
+  // where ใน subquery ไม่นับ, or ใน subquery ไม่ต้องครอบ
+  assert.equal(
+    addWhere("select id, name from t where id in (select id from u where a or b)", `"name" = 'x'`),
+    `select id, name from t where id in (select id from u where a or b)\n  and "name" = 'x'`,
+  );
+  assert.equal(
+    addWhere("select kind, count(*) as n from t group by kind\nlimit 15", `"n" = 3`),
+    'select *\nfrom (\nselect kind, count(*) as n from t group by kind\n) _f\nwhere "n" = 3\nlimit 15',
+  );
+  assert.equal(addWhere("select a as b from t", `"b" = 1`), 'select *\nfrom (\nselect a as b from t\n) _f\nwhere "b" = 1');
+});
