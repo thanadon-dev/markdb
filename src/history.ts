@@ -30,6 +30,10 @@ export type Entry = {
   sql?: string;
   /** DELETE ที่พิมพ์จาก editor: จำนวนแถวที่ลบจริง */
   count?: number;
+  /** update: วางทับหลายช่องทีเดียว (จาก Excel) — ย้อนทั้งชุดใน transaction เดียว */
+  cells?: { keys: { column: string; value: Val }[]; column: string; before: Val; after: Val }[];
+  /** insert: เพิ่มหลายแถวทีเดียว — key ของแต่ละแถว (คู่กับ rows) */
+  keyList?: { column: string; value: Val }[][];
   /** ย้อนกลับไปแล้ว */
   undone?: boolean;
   /** รายการนี้เกิดจากการกดย้อนกลับ */
@@ -37,7 +41,7 @@ export type Entry = {
 };
 
 export type Plan =
-  | { cmd: "update_cell" | "insert_row" | "insert_rows" | "delete_row"; args: Record<string, unknown>; summary: string }
+  | { cmd: "update_cell" | "update_cells" | "insert_row" | "insert_rows" | "delete_row" | "delete_rows"; args: Record<string, unknown>; summary: string }
   | { reason: string };
 
 export const KEY = "markdb.history.v1";
@@ -69,12 +73,28 @@ export const add = (list: Entry[], e: Entry) => [e, ...list].slice(0, CAP);
    ไม่ได้ต่อ SQL เองใหม่ จะได้ผ่านด่านนับแถว (ต้องโดน 1 แถว) เหมือนตอนแก้ปกติ */
 export const revertPlan = (e: Entry): Plan => {
   if (e.undone) return { reason: "รายการนี้ย้อนกลับไปแล้ว" };
+  if (e.kind === "update" && e.cells) {
+    return {
+      cmd: "update_cells",
+      args: { table: e.table, changes: e.cells.map((c) => ({ keys: c.keys, column: c.column, value: c.before })) },
+      summary: `update ${e.table} กลับ ${e.cells.length} ช่อง (ใน transaction เดียว)`,
+    };
+  }
   if (e.kind === "update") {
     if (!e.keys?.length) return { reason: "ไม่ได้เก็บ primary key ของแถวนี้ไว้ ย้อนกลับไม่ได้" };
     return {
       cmd: "update_cell",
       args: { table: e.table, column: e.column, value: e.before ?? null, keys: e.keys },
       summary: `update ${e.table} set ${e.column} = ${show(e.before)}`,
+    };
+  }
+  if (e.kind === "insert" && e.keyList) {
+    if (e.keyList.some((k) => !k.length || k.some((x) => x.value === null)))
+      return { reason: "ไม่รู้ primary key ของบางแถว (Redshift ไม่คืนค่าที่ DB สร้างให้) — ลบเองจากตาราง" };
+    return {
+      cmd: "delete_rows",
+      args: { table: e.table, keys: e.keyList },
+      summary: `delete ${e.keyList.length} แถวที่เพิ่มไปจาก ${e.table} (ใน transaction เดียว)`,
     };
   }
   if (e.kind === "insert") {
@@ -123,5 +143,14 @@ export const revertPlan = (e: Entry): Plan => {
 /* รายการที่บันทึกหลังกดย้อนกลับสำเร็จ — ย้อนของย้อนได้อีกที ประวัติจึงตรงกับของจริงเสมอ */
 export const reverseOf = (e: Entry, id: string, at: number): Entry | null =>
   e.kind === "update"
-    ? { ...e, id, at, before: e.after ?? null, after: e.before ?? null, undone: false, isRevert: true }
+    ? {
+        ...e,
+        id,
+        at,
+        before: e.after ?? null,
+        after: e.before ?? null,
+        cells: e.cells?.map((c) => ({ ...c, before: c.after, after: c.before })),
+        undone: false,
+        isRevert: true,
+      }
     : null;

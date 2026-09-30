@@ -6,9 +6,11 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
-import { stmtAt, stmtRangeAt, targetTable } from "./sqlsplit";
-import { parseTail, quoteIdent, withTail } from "./sqltail";
-import { suggest } from "./newrow";
+import { statements, stmtAt, stmtRangeAt, targetTable } from "./sqlsplit";
+import { addWhere, filterCond, parseTail, quoteIdent, withTail, type FilterOp } from "./sqltail";
+import { parseTsv, pasteCells, suggest } from "./newrow";
+import { risk } from "./guard";
+import * as qh from "./queries";
 import * as hist from "./history";
 import { PostgreSQL, sql as sqlLang } from "@codemirror/lang-sql";
 import { createTheme } from "@uiw/codemirror-themes";
@@ -34,6 +36,10 @@ import {
   ArrowCounterClockwise,
   ArrowsLeftRight,
   EyeSlash,
+  Funnel,
+  LockSimple,
+  ShieldWarning,
+  TerminalWindow,
   SortAscending,
   SortDescending,
   SquaresFour,
@@ -96,6 +102,8 @@ type Tab = {
   /** คำสั่งที่รันแล้วได้ res นี้ — ใช้แบ่งหน้า / order by และโชว์ในสรุปผล */
   ran?: string;
   ranAt?: number;
+  /** คำสั่งที่รันแล้ว error — ปุ่ม "ให้ AI แก้" ใช้ตัวนี้ */
+  failed?: string;
 };
 type ColumnInfo = {
   name: string;
@@ -155,6 +163,10 @@ type Conn = {
   db: string;
   ssl: boolean;
   url?: string; // connection ที่บันทึกไว้แบบเดิม (เป็น URL ล้วน)
+  /** production: แถบแดง + ถามก่อนรันคำสั่งที่แก้ข้อมูล */
+  prod?: boolean;
+  /** อ่านอย่างเดียว: ห้ามแก้ข้อมูลทุกทาง (Postgres บังคับที่ระดับ session ด้วย) */
+  readonly?: boolean;
 };
 
 const CONNS_KEY = "markdb.conns";
@@ -226,6 +238,37 @@ const Close = ({ on }: { on: () => void }) => (
     <X size={14} weight="bold" />
   </button>
 );
+
+/* ปุ่มยืนยันสิ่งที่ลบแล้วเรียกคืนไม่ได้ — กดได้หลังรอ 3 วินาที (แถบวิ่งให้เห็นว่ารออยู่)
+   แทนการให้พิมพ์ชื่อยืนยัน: กันกดพลาดได้พอ ๆ กันแต่ไม่ต้องพิมพ์อะไร */
+const HoldButton = ({ onClick, children, ms = 3000 }: { onClick: () => void; children: React.ReactNode; ms?: number }) => {
+  const [left, setLeft] = useState(Math.ceil(ms / 1000));
+  useEffect(() => {
+    const t0 = Date.now();
+    const id = setInterval(() => {
+      const l = Math.max(0, Math.ceil((ms - (Date.now() - t0)) / 1000));
+      setLeft(l);
+      if (!l) clearInterval(id);
+    }, 100);
+    return () => clearInterval(id);
+  }, [ms]);
+  return (
+    <button
+      className={"btn primary sm danger hold" + (left ? " wait" : "")}
+      disabled={left > 0}
+      onClick={onClick}
+      style={{ "--hold": `${ms}ms` } as React.CSSProperties}
+    >
+      {left ? (
+        <>
+          <Spinner size={14} className="spin" /> รอ {left} วินาที…
+        </>
+      ) : (
+        children
+      )}
+    </button>
+  );
+};
 
 const connUrl = (c: Conn) => {
   if (c.url) return c.url;
@@ -1170,6 +1213,8 @@ const Grid = memo(function Grid({
   serverOrder,
   newCols,
   onInsert,
+  onFilter,
+  onPasteCells,
 }: {
   res: QueryResult;
   pk: string[];
@@ -1187,14 +1232,18 @@ const Grid = memo(function Grid({
   /** คอลัมน์ของตารางเป้าหมาย (type/default) — มี = โชว์แถวใหม่จาง ๆ ท้ายตารางให้พิมพ์เพิ่มแถวได้ */
   newCols?: ColumnInfo[];
   /** insert แถวใหม่ — ค่าว่าง = ไม่ส่ง ให้ DB ใส่ DEFAULT, "NULL" = null; throw = error ไปโชว์ที่แถว */
-  onInsert?: (vals: Record<string, string>) => Promise<void>;
+  onInsert?: (rows: Record<string, string>[]) => Promise<void>;
+  /** คลิกขวาที่ cell → กรองด้วยค่านี้ (เติม where ใน SQL แล้วรันใหม่) — ไม่มี = SQL นี้แก้ไม่ได้ */
+  onFilter?: (col: string, op: FilterOp, v: unknown) => void;
+  /** วางจาก Excel ทับ cell ที่คลุม — value null = NULL, cut = จำนวนช่องที่เกินขอบตาราง */
+  onPasteCells?: (changes: { ri: number; col: string; value: string | null }[], cut: number) => void;
 }) {
   const parent = useRef<HTMLDivElement>(null);
   // cur ชี้ด้วย "ลำดับที่เห็นบนจอ" (index ใน order) ไม่ใช่ index จริงของแถว
   // การกดลูกศรจึงเดินตามที่ตาเห็นแม้กำลังกรองหรือเรียงอยู่
   const [cur, setCur] = useState<{ r: number; c: number } | null>(null);
   const [sel, setSel] = useState<Set<number>>(() => new Set());
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; cell?: { col: string; v: unknown } } | null>(null);
   // ช่องตั้งต้นของการคลุม — คู่กับ cur เป็นมุมตรงข้ามของสี่เหลี่ยมที่เลือกอยู่
   const [mark, setMark] = useState<{ r: number; c: number } | null>(null);
   const dragging = useRef(false);
@@ -1550,14 +1599,16 @@ const Grid = memo(function Grid({
     setGerr("");
     parent.current?.focus();
   };
-  /* Enter หรือคลิกออกนอกแถว = insert ทันที, ยังไม่ได้พิมพ์อะไรเลย = แค่ปิด */
-  const saveGhost = async () => {
-    if (!ghost || !onInsert || gsaving) return;
-    if (!Object.values(ghost).some((v) => v !== "")) return closeGhost();
+  /* Enter หรือคลิกออกนอกแถว = insert ทันที, ยังไม่ได้พิมพ์อะไรเลย = แค่ปิด
+     many = วางหลายแถวจาก Excel ลงแถวใหม่ — insert ทั้งหมดใน transaction เดียว */
+  const saveGhost = async (many?: Record<string, string>[]) => {
+    if (!onInsert || gsaving) return;
+    const batch = (many ?? (ghost ? [ghost] : [])).filter((r) => Object.values(r).some((v) => v !== ""));
+    if (!batch.length) return many ? undefined : closeGhost();
     setGsaving(true);
     setGerr("");
     try {
-      await onInsert(ghost);
+      await onInsert(batch);
       // พร้อมพิมพ์แถวต่อไปเลย — แถวที่เพิ่งบันทึกไปต่อท้ายตาราง ต้องเลื่อนตามลงไป
       setGhost({});
       // แถวถัดไปเริ่มที่ช่องแรกที่ต้องพิมพ์เอง ข้าม id ที่ DB รันให้
@@ -1621,6 +1672,33 @@ const Grid = memo(function Grid({
       }
     }
   };
+  /* วางลงแถวใหม่: ค่าเดียว = วางลงช่องตามปกติ, แถวเดียวหลายคอลัมน์ = เติมเรียงไปทางขวา (ยังไม่บันทึก)
+     หลายแถว = insert เลยทั้งหมด — ช่องที่ห้ามว่างแต่ไม่ได้วาง (uuid, เวลา) เติมค่าแนะนำให้ทีละแถว */
+  const ghostPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const text = e.clipboardData.getData("text");
+    if (!/[\t\n]/.test(text.replace(/\r?\n$/, ""))) return;
+    e.preventDefault();
+    const rows = parseTsv(text).map((r) => {
+      const o: Record<string, string> = {};
+      r.forEach((v, x) => {
+        const c = cols[gcol + x];
+        if (c && colMeta[c]) o[c] = v;
+      });
+      return o;
+    });
+    if (rows.length === 1) {
+      setGhost((g) => ({ ...(g ?? {}), ...rows[0] }));
+      setGerr("");
+      return;
+    }
+    for (const r of rows)
+      for (const m of Object.values(colMeta))
+        if (!r[m.name] && !m.nullable && !m.default) {
+          const f = suggest(m).fill;
+          if (f !== null) r[m.name] = f;
+        }
+    saveGhost(rows);
+  };
   const dirty = !!ghost && Object.values(ghost).some((v) => v !== "");
   const ghostRow = ghostOn && (
     <div
@@ -1643,6 +1721,7 @@ const Grid = memo(function Grid({
                 disabled={gsaving}
                 onChange={(e) => setG(c, e.target.value)}
                 onKeyDown={ghostKey}
+                onPaste={ghostPaste}
               />
             </div>
           );
@@ -1754,7 +1833,29 @@ Tab = เติมค่าที่แนะนำ · Enter = บันทึ�
   }
 
   return (
-    <div className="result grid" ref={parent} tabIndex={0} onKeyDown={onKey}>
+    <div
+      className="result grid"
+      ref={parent}
+      tabIndex={0}
+      onKeyDown={onKey}
+      onPaste={(e) => {
+        // เฉพาะตอนโฟกัสอยู่ที่ตาราง — วางใน input ของ cell/แถวใหม่ให้ input จัดการเอง
+        if (e.target !== e.currentTarget || !editable || !onPasteCells || !cur) return;
+        const text = e.clipboardData.getData("text");
+        if (!text) return;
+        e.preventDefault();
+        const box = rect ?? { r1: cur.r, r2: cur.r, c1: cur.c, c2: cur.c };
+        const { cells, cut } = pasteCells(parseTsv(text), box, order.length, cols.length);
+        onPasteCells(
+          cells.map(({ r, c, v }) => ({
+            ri: order[r],
+            col: cols[c],
+            value: v === "" || v.toUpperCase() === "NULL" ? null : v,
+          })),
+          cut,
+        );
+      }}
+    >
       <div className="grid-head" style={{ gridTemplateColumns: template }}>
         {cols.map((c) => {
           const srv =
@@ -1815,7 +1916,9 @@ Tab = เติมค่าที่แนะนำ · Enter = บันทึ�
                   setSel(new Set([ri]));
                   onSelect([ri]);
                 }
-                setMenu({ x: e.clientX, y: e.clientY });
+                const at = (e.target as HTMLElement).closest("[data-c]") as HTMLElement | null;
+                const col = at ? cols[Number(at.dataset.c)] : undefined;
+                setMenu({ x: e.clientX, y: e.clientY, cell: col ? { col, v: row[col] } : undefined });
               }}
             >
               {cols.map((c, ci) => {
@@ -1889,6 +1992,45 @@ Tab = เติมค่าที่แนะนำ · Enter = บันทึ�
             }}
           />
           <div className="ctxmenu" style={{ left: menu.x, top: menu.y }}>
+            {onFilter &&
+              menu.cell &&
+              (() => {
+                const { col, v } = menu.cell;
+                const txt = cellText(v);
+                const short = txt.length > 28 ? txt.slice(0, 28) + "…" : txt;
+                const f = (op: FilterOp) => (onFilter(col, op, v), setMenu(null));
+                return (
+                  <>
+                    <div className="ctxhead">กรองด้วย {col}</div>
+                    {v === null || v === undefined ? (
+                      <>
+                        <button onClick={() => f("null")}>
+                          <Funnel size={14} weight="duotone" /> is null
+                        </button>
+                        <button onClick={() => f("notnull")}>
+                          <Funnel size={14} /> is not null
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button onClick={() => f("eq")}>
+                          <Funnel size={14} weight="duotone" /> = {short}
+                        </button>
+                        <button onClick={() => f("ne")}>
+                          <Funnel size={14} /> ≠ {short}
+                        </button>
+                        <button onClick={() => f("like")}>
+                          <Funnel size={14} /> มีคำว่า “{short}”
+                        </button>
+                        <button onClick={() => f("null")}>
+                          <Funnel size={14} /> is null
+                        </button>
+                      </>
+                    )}
+                    <div className="ctxsep" />
+                  </>
+                );
+              })()}
             {manyCells && (
               <button onClick={() => (onCopy(rectTsv()), setMenu(null))}>
                 <Copy size={14} weight="duotone" /> Copy selection (
@@ -2005,6 +2147,20 @@ export default function App() {
   const [logSel, setLogSel] = useState<string | null>(null);
   const [clearArm, setClearArm] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
+  // ด่านก่อนรัน: UPDATE/DELETE ไม่มี WHERE หรือแก้ข้อมูลบน PROD — รอผู้ใช้กดยืนยัน
+  const [guard, setGuard] = useState<{
+    id: string;
+    sql: string;
+    conn: string;
+    noWhere: string[];
+    prod: boolean;
+    log: boolean;
+  } | null>(null);
+  // ประวัติ SQL ที่รัน
+  const [ranLog, setRanLog] = useState<qh.Ran[]>(qh.load);
+  const [qOpen, setQOpen] = useState(false);
+  const [qSearch, setQSearch] = useState("");
+  const [qClear, setQClear] = useState(false);
   const [mode, setMode] = useState<"grid" | "record">("grid");
   const [selRows, setSelRows] = useState<number[]>([]);
   const [confirmDel, setConfirmDel] = useState<Record<string, unknown> | null>(null);
@@ -2017,7 +2173,6 @@ export default function App() {
     op: "truncate" | "drop";
     rows: number | null;
   } | null>(null);
-  const [typed, setTyped] = useState("");
   const [cascade, setCascade] = useState(false);
   const [edges, setEdges] = useState<Edge[] | null>(null);
   // คอลัมน์ของตาราง (type/default) ไว้ให้แถวใหม่ท้ายตารางใช้บอกใบ้ — key เดียวกับ keys
@@ -2077,7 +2232,10 @@ export default function App() {
 
   const missingKeys = (rowKey ?? []).filter((k) => !tab?.res?.columns.includes(k));
 
-  const editable = !!(tab?.res?.columns.length && rowKey?.length && !missingKeys.length);
+  const tabInfo = conns.find((c) => c.id === tabConn);
+  const ro = !!tabInfo?.readonly;
+  const activeRo = !!conns.find((c) => c.id === activeConn)?.readonly;
+  const editable = !!(tab?.res?.columns.length && rowKey?.length && !missingKeys.length && !ro);
 
   useEffect(() => {
     if (!editable || !keyId || tcols[keyId] !== undefined) return;
@@ -2092,7 +2250,9 @@ export default function App() {
 
   const editReason = !tab?.res?.columns.length
     ? ""
-    : !target
+    : ro
+      ? `${tabInfo?.name} ตั้งเป็นอ่านอย่างเดียว — แก้ข้อมูลไม่ได้`
+      : !target
       ? "แก้ค่าได้เฉพาะ select จากตารางเดียว (มี join หรือ subquery จะปิดไว้)"
       : rowKey === undefined
         ? "กำลังตรวจ key ของตาราง…"
@@ -2100,7 +2260,7 @@ export default function App() {
           ? "ตารางนี้ไม่มี primary key หรือ unique index — แก้ค่าตรง ๆ ไม่ได้"
           : `ใส่ ${missingKeys.join(", ")} ไว้ใน select ด้วยถึงจะแก้ค่าได้`;
 
-  const canAddRow = !!target;
+  const canAddRow = !!target && !ro;
 
   useEffect(() => {
     setSelRows([]);
@@ -2136,6 +2296,8 @@ export default function App() {
   useEffect(() => {
     const onEsc = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      if (guard) return setGuard(null);
+      if (qOpen) return setQOpen(false);
       if (toolsOpen) return setToolsOpen(false);
       if (tblMenu) return setTblMenu(null);
       if (logOpen) return setLogOpen(false);
@@ -2153,9 +2315,10 @@ export default function App() {
     };
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
-  }, [toolsOpen, tblMenu, logOpen, danger, addRow, confirmDel, restoreFile, csvJob, syncOpen, busy, props, exportOpen, erOpen, form, updatesOpen, pct]);
+  }, [guard, qOpen, toolsOpen, tblMenu, logOpen, danger, addRow, confirmDel, restoreFile, csvJob, syncOpen, busy, props, exportOpen, erOpen, form, updatesOpen, pct]);
 
   useEffect(() => hist.save(log), [log]);
+  useEffect(() => qh.save(ranLog), [ranLog]);
 
   const patch = useCallback(
     (id: string, p: Partial<Tab>) =>
@@ -2189,7 +2352,7 @@ export default function App() {
       setBusy(true);
       setConnecting(c.id);
       try {
-        const info = await invoke<ConnInfo>("connect", { conn: c.id, url: connUrl(c) });
+        const info = await invoke<ConnInfo>("connect", { conn: c.id, url: connUrl(c), readonly: !!c.readonly });
         setActiveConn(c.id);
         await loadMeta(c.id);
         // เลือกผิดก็ยังใช้ได้ — จำค่าที่ตรวจได้จริงไว้แทน
@@ -2219,15 +2382,31 @@ export default function App() {
     });
   }, []);
 
+  /* ok = ผ่านด่านยืนยันมาแล้ว, log = เก็บลงประวัติ SQL (เฉพาะที่ผู้ใช้กดรันเอง ไม่นับแบ่งหน้า/รีเฟรช) */
   const run = useCallback(
-    async (id: string, sqlText: string, connId?: string) => {
-      const c = connId ?? tabs.find((t) => t.id === id)?.conn ?? activeConn;
+    async (id: string, sqlText: string, connId?: string, opt: { ok?: boolean; log?: boolean } = {}) => {
+      // แท็บที่เปิดไว้ก่อนเชื่อมต่อมี conn เป็น "" — ต้องใช้ || ไม่ใช่ ?? ถึงจะตกไปใช้ตัวที่เลือกอยู่
+      const c = connId || tabs.find((t) => t.id === id)?.conn || activeConn;
       if (!live[c]) return say("แท็บนี้ยังไม่ได้เชื่อมต่อ");
       if (!sqlText.trim()) return;
+      const info = conns.find((x) => x.id === c);
+      if (!opt.ok) {
+        const rs = statements(sqlText).map(risk);
+        const writes = rs.some((r) => r.write);
+        if (writes && info?.readonly) return say(`${info.name} ตั้งเป็นอ่านอย่างเดียว — รันคำสั่งที่แก้ข้อมูลไม่ได้`);
+        const noWhere = rs.flatMap((r) => (r.noWhere ? [r.noWhere] : []));
+        if (noWhere.length || (writes && info?.prod))
+          return setGuard({ id, sql: sqlText, conn: c, noWhere, prod: !!info?.prod && writes, log: !!opt.log });
+      }
+      const at = Date.now();
+      const logRan = (x: Partial<qh.Ran>) =>
+        opt.log &&
+        setRanLog((l) => qh.add(l, { id: uid(), at, conn: c, connName: info?.name ?? "", sql: sqlText.trim(), ...x }));
       patch(id, { running: true, err: undefined });
       try {
         const res = await invoke<QueryResult>("run_query", { conn: c, sql: sqlText });
-        patch(id, { res, running: false, ran: sqlText.trim(), ranAt: Date.now() });
+        patch(id, { res, running: false, ran: sqlText.trim(), ranAt: Date.now(), failed: undefined });
+        logRan({ ms: res.elapsed_ms, rows: res.columns.length ? res.rows.length : res.affected });
         // DELETE ที่พิมพ์เอง: เก็บแถวที่ถูกลบลงประวัติ ย้อนกลับได้เหมือนลบจากตาราง
         const d = res.deleted;
         if (d && res.affected > 0)
@@ -2250,7 +2429,8 @@ export default function App() {
             }),
           );
       } catch (e) {
-        patch(id, { err: String(e), running: false, res: undefined });
+        patch(id, { err: String(e), running: false, res: undefined, failed: sqlText.trim() });
+        logRan({ err: String(e) });
       }
     },
     [tabs, live, activeConn, conns, patch, say],
@@ -2340,7 +2520,6 @@ export default function App() {
   /* เปิดกล่องยืนยัน แล้วค่อยไปถามจำนวนแถวมาโชว์ว่ากำลังจะลบอะไรไปเท่าไหร่ */
   const askDanger = useCallback(
     async (t: TableInfo, op: "truncate" | "drop") => {
-      setTyped("");
       setCascade(false);
       setDanger({ t, op, rows: null });
       try {
@@ -2467,40 +2646,87 @@ export default function App() {
   /* แถวใหม่ท้ายตาราง: insert แล้วต่อท้ายผลลัพธ์บนจอเลย ไม่รัน query ใหม่
      (มี limit/order by อยู่ แถวที่เพิ่งเพิ่มอาจไปอยู่หน้าอื่นจนดูเหมือนหาย) */
   const insertNew = useCallback(
-    async (vals: Record<string, string>) => {
+    async (batch: Record<string, string>[]) => {
       if (!tab || !target) return;
-      const values = Object.entries(vals)
-        .filter(([, v]) => v !== "")
-        .map(([column, v]) => ({ column, value: v.toUpperCase() === "NULL" ? null : v }));
-      // Postgres คืนทั้งแถวที่บันทึกจริง (id/uuid ที่ DB สร้าง) — Redshift คืน null ใช้ค่าที่พิมพ์แทน
-      const saved = await invoke<Record<string, unknown> | null>("insert_row", {
-        conn: tab.conn,
-        table: target,
-        values,
-      });
-      const row = saved ?? Object.fromEntries(values.map((v) => [v.column, v.value]));
-      logIt(
-        {
-          kind: "insert",
+      const rowsIn = batch.map((vals) =>
+        Object.entries(vals)
+          .filter(([, v]) => v !== "")
+          .map(([column, v]) => ({ column, value: v.toUpperCase() === "NULL" ? null : v })),
+      );
+      const typed = (r: { column: string; value: string | null }[]) =>
+        Object.fromEntries(r.map((v) => [v.column, v.value])) as Record<string, unknown>;
+      // Postgres คืนแถวที่บันทึกจริง (id/uuid ที่ DB สร้าง) — Redshift คืนว่าง ใช้ค่าที่พิมพ์แทน
+      let saved: Record<string, unknown>[];
+      if (rowsIn.length === 1) {
+        const one = await invoke<Record<string, unknown> | null>("insert_row", {
+          conn: tab.conn,
           table: target,
-          keys: pkKeys(row),
-          row: Object.fromEntries(Object.entries(row).map(([k, v]) => [k, asVal(v)])),
-        },
+          values: rowsIn[0],
+        });
+        saved = [one ?? typed(rowsIn[0])];
+      } else {
+        const got = await invoke<Record<string, unknown>[]>("insert_rows", { conn: tab.conn, table: target, rows: rowsIn });
+        saved = got.length ? got : rowsIn.map(typed);
+      }
+      const flat = (r: Record<string, unknown>) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, asVal(v)]));
+      logIt(
+        saved.length === 1
+          ? { kind: "insert", table: target, keys: pkKeys(saved[0]), row: flat(saved[0]) }
+          : { kind: "insert", table: target, keyList: saved.map(pkKeys), rows: saved.map(flat), count: saved.length },
         tab.conn,
       );
       setTabs((ts) =>
-        ts.map((t) => (t.id === tab.id && t.res ? { ...t, res: { ...t.res, rows: [...t.res.rows, row] } } : t)),
+        ts.map((t) => (t.id === tab.id && t.res ? { ...t, res: { ...t.res, rows: [...t.res.rows, ...saved] } } : t)),
       );
-      say("เพิ่มแถวแล้ว");
+      say(saved.length === 1 ? "เพิ่มแถวแล้ว" : `เพิ่ม ${saved.length} แถวแล้ว — ย้อนได้ใน History`);
     },
     [tab, target, pkKeys, logIt, say],
+  );
+
+  /* วางจาก Excel ทับ cell ที่คลุม — แก้ทุกช่องใน transaction เดียว พังช่องเดียวยกเลิกหมด ย้อนได้ทั้งชุด */
+  const pasteInto = useCallback(
+    async (changes: { ri: number; col: string; value: string | null }[], cut: number) => {
+      if (!tab?.res || !target || !rowKey?.length) return;
+      const rows = tab.res.rows;
+      const real = changes
+        .filter((c) => asVal(rows[c.ri][c.col]) !== c.value)
+        // แก้คอลัมน์ key ทีหลังสุด ไม่งั้นช่องอื่นในแถวเดียวกันหาแถวไม่เจอ
+        .sort((a, b) => Number(rowKey.includes(a.col)) - Number(rowKey.includes(b.col)));
+      if (!real.length) return say(cut ? "ส่วนที่วางเกินขอบตารางทั้งหมด" : "ค่าเหมือนเดิม ไม่มีอะไรเปลี่ยน");
+      const cells = real.map((c) => ({
+        keys: pkKeys(rows[c.ri]),
+        column: c.col,
+        before: asVal(rows[c.ri][c.col]),
+        after: c.value,
+      }));
+      try {
+        await invoke("update_cells", {
+          conn: tab.conn,
+          table: target,
+          changes: cells.map((c) => ({ keys: c.keys, column: c.column, value: c.after })),
+        });
+        logIt(
+          cells.length === 1
+            ? { kind: "update", table: target, ...cells[0] }
+            : { kind: "update", table: target, cells, column: [...new Set(cells.map((c) => c.column))].join(", ") },
+          tab.conn,
+        );
+        const next = rows.slice();
+        for (const c of real) next[c.ri] = { ...next[c.ri], [c.col]: c.value };
+        setTabs((ts) => ts.map((t) => (t.id === tab.id && t.res ? { ...t, res: { ...t.res, rows: next } } : t)));
+        say(`วาง ${cells.length} ช่องแล้ว${cut ? ` (เกินขอบตาราง ${cut} ช่อง ตัดทิ้ง)` : ""} — ย้อนได้ใน History`);
+      } catch (e) {
+        say(String(e));
+      }
+    },
+    [tab, target, rowKey, pkKeys, logIt, say],
   );
 
   /* ฟอร์ม Add row — ส่งเฉพาะช่องที่กรอกจริง ที่เหลือปล่อยให้ DEFAULT ของตารางทำงาน */
   const saveNewRow = useCallback(async () => {
     if (!addRow) return;
     try {
-      await insertNew(addRow.vals);
+      await insertNew([addRow.vals]);
       setAddRow(null);
     } catch (e) {
       say(String(e));
@@ -2757,9 +2983,9 @@ export default function App() {
 
   /* AI เขียน SQL แล้วพิมพ์ทับ editor ของแท็บนี้ทีละก้อน — ไม่รันให้ ผู้ใช้อ่านแล้วกด Run เอง
      ส่งโครงสร้าง DB (ไม่มีข้อมูลในตาราง) + SQL ที่อยู่ใน editor ไปด้วย จะได้สั่งแก้ต่อได้ */
-  const genSql = useCallback(async () => {
-    const ask = aiAsk.trim();
-    if (!tab || !ask || aiBusy) return;
+  /* focus = แก้เฉพาะคำสั่งนี้ใน editor (ปุ่มให้ AI แก้ error) ส่วนอื่นใน editor ไม่แตะ */
+  const aiWrite = useCallback(async (ask: string, focus?: string) => {
+    if (!tab || !ask || aiBusy) return false;
     // แท็บที่เปิดไว้ก่อนเชื่อมต่อยังไม่ผูก connection — ใช้ตัวที่เลือกอยู่แทน
     const connId = tab.conn || activeConn;
     const meta = live[connId];
@@ -2769,7 +2995,7 @@ export default function App() {
       meta
         ? `Database schema (${meta.tables.length} tables, one per line as schema.table(column type, ...)):\n${schemaText(meta)}`
         : "No database is connected, so the schema is unknown.",
-      before.trim() ? `SQL currently in the editor:\n${before}` : "",
+      before.trim() && !focus ? `SQL currently in the editor:\n${before}` : "",
       `Request: ${ask}`,
     ]
       .filter(Boolean)
@@ -2778,9 +3004,11 @@ export default function App() {
     setAiBusy(true);
     setAiErr("");
     let raw = "";
+    const only = !!focus && before.includes(focus);
+    const put = (x: string) => (only ? before.replace(focus!, () => x.trim()) : x);
     const unlisten = await listen<string>("ai-delta", (e) => {
       raw += e.payload;
-      patch(tab.id, { sql: tidySql(raw) });
+      patch(tab.id, { sql: put(tidySql(raw)) });
     });
     try {
       const sql = await invoke<string>("ai_sql", {
@@ -2789,8 +3017,8 @@ export default function App() {
         model: ai.model,
         effort: ai.effort,
       });
-      patch(tab.id, { sql: tidySql(sql).trimEnd() + "\n" });
-      setAiAsk("");
+      patch(tab.id, { sql: only ? put(tidySql(sql)) : tidySql(sql).trimEnd() + "\n" });
+      return true;
     } catch (e) {
       // หยุดกลางคัน / error: ครึ่ง ๆ กลาง ๆ ใช้ไม่ได้ คืน SQL เดิม
       patch(tab.id, { sql: before });
@@ -2799,16 +3027,32 @@ export default function App() {
       unlisten();
       setAiBusy(false);
     }
-  }, [aiAsk, aiBusy, tab, activeConn, live, conns, ai, patch]);
+    return false;
+  }, [aiBusy, tab, activeConn, live, conns, ai, patch]);
+
+  const genSql = useCallback(async () => {
+    if (await aiWrite(aiAsk.trim())) setAiAsk("");
+  }, [aiWrite, aiAsk]);
+
+  /* รันแล้ว error → ให้ AI แก้เฉพาะคำสั่งที่พัง เขียนทับลง editor ให้ดูก่อน ไม่รันเอง */
+  const fixSql = useCallback(() => {
+    if (!tab?.failed || !tab.err) return;
+    setAiOpen(true);
+    aiWrite(
+      `The statement below failed on the database.\n\nError:\n${tab.err}\n\nStatement:\n${tab.failed}\n\n` +
+        `Return only the corrected statement, not other SQL. Start with one short "--" comment in Thai saying what was wrong and what you changed.`,
+      tab.failed,
+    );
+  }, [tab, aiWrite]);
 
   /* ลากคลุมไว้ = รันเฉพาะที่คลุม, ไม่ได้คลุม = รันเฉพาะคำสั่งที่เคอร์เซอร์อยู่ */
   const runNow = useCallback(() => {
     if (!tab) return;
     const st = cmRef.current?.view?.state;
-    if (!st) return run(tab.id, tab.sql);
+    if (!st) return run(tab.id, tab.sql, undefined, { log: true });
     const { from, to, head } = st.selection.main;
     const sel = st.sliceDoc(from, to).trim();
-    run(tab.id, sel || stmtAt(st.doc.toString(), head));
+    run(tab.id, sel || stmtAt(st.doc.toString(), head), undefined, { log: true });
   }, [tab, run]);
 
   const runRef = useRef(runNow);
@@ -2832,6 +3076,11 @@ export default function App() {
       } else if (e.key.toLowerCase() === "k") {
         e.preventDefault();
         setAiOpen(true);
+      } else if (e.key.toLowerCase() === "h") {
+        e.preventDefault();
+        setQSearch("");
+        setQClear(false);
+        setQOpen(true);
       }
     };
     window.addEventListener("keydown", h);
@@ -2920,24 +3169,42 @@ export default function App() {
 
   /* แบ่งหน้า / order by: แก้ส่วนท้ายของคำสั่งที่เพิ่งรัน เขียนกลับลง editor ให้เห็นว่ารันอะไร แล้วรันใหม่ */
   const tail = tab?.res?.columns.length && tab.ran && isSelect(tab.ran) ? parseTail(tab.ran) : null;
-  const rerunTail = (change: Parameters<typeof withTail>[1]) => {
-    if (!tab?.ran) return;
-    const next = withTail(tab.ran, change);
-    if (!next) return;
+  const rerunSql = (next: string | null) => {
+    if (!tab?.ran || !next) return;
     const ran = tab.ran;
     if (tab.sql.includes(ran)) patch(tab.id, { sql: tab.sql.replace(ran, () => next) });
     run(tab.id, next);
+  };
+  const rerunTail = (change: Parameters<typeof withTail>[1]) => tab?.ran && rerunSql(withTail(tab.ran, change));
+  /* คลิกขวา cell → กรอง: เติมเงื่อนไขเข้า where ของคำสั่งที่เพิ่งรัน แล้วรันใหม่ */
+  const filterBy = (col: string, op: FilterOp, v: unknown) =>
+    tab?.ran && rerunSql(addWhere(tab.ran, filterCond(col, op, v)));
+
+  const openRan = (r: qh.Ran, fresh: boolean) => {
+    setQOpen(false);
+    if (fresh || !tab) {
+      const nt = newTab(live[r.conn] ? r.conn : activeConn, { title: "SQL", sql: r.sql });
+      setTabs((ts) => [...ts, nt]);
+      setActiveTab(nt.id);
+    } else patch(tab.id, { sql: r.sql });
   };
   const orderBy = (col: string, dir: "asc" | "desc" | null) =>
     rerunTail({ order: dir ? `${quoteIdent(col)} ${dir}` : null, offset: null });
 
   // เมนูเครื่องมือมุมซ้ายล่าง — ปุ่มใหม่ในอนาคตเพิ่มในรายการนี้ที่เดียว
   const tools = [
-    { label: "Import", hint: "นำเข้า CSV / รันไฟล์ SQL", icon: UploadSimple, run: importFile, off: !connected },
+    { label: "Import", hint: "นำเข้า CSV / รันไฟล์ SQL", icon: UploadSimple, run: importFile, off: !connected || activeRo },
     { label: "Export", hint: "ส่งออกผลลัพธ์บนจอ", icon: DownloadSimple, run: () => setExportOpen(true), off: !tab?.res },
     { label: "History", hint: "ประวัติแก้ไข / ลบ — ย้อนกลับได้", icon: ClockCounterClockwise, run: openHistory, off: false, dot: hasUndo },
+    {
+      label: "SQL ที่รัน",
+      hint: "ประวัติ query — ค้นหาแล้วเปิดซ้ำได้ (Ctrl+H)",
+      icon: TerminalWindow,
+      run: () => (setQSearch(""), setQClear(false), setQOpen(true)),
+      off: false,
+    },
     { label: "Backup", hint: "dump ทั้ง database เป็นไฟล์ .sql", icon: FloppyDisk, run: backup, off: !connected },
-    { label: "Restore", hint: "รันไฟล์ .sql กลับเข้า database นี้", icon: ArrowCounterClockwise, run: pickRestore, off: !connected },
+    { label: "Restore", hint: "รันไฟล์ .sql กลับเข้า database นี้", icon: ArrowCounterClockwise, run: pickRestore, off: !connected || activeRo },
     {
       label: "Sync",
       hint: "ทำให้ตารางใน DB อื่นเหมือนตัวนี้",
@@ -2981,6 +3248,8 @@ export default function App() {
             >
               <EngineLogo engine={c.engine ?? "postgres"} size={15} />
               <span>{c.name}</span>
+              {c.prod && <em className="envtag prod">PROD</em>}
+              {c.readonly && <em className="envtag ro">RO</em>}
               {connecting === c.id ? (
                 <Spinner size={12} className="spin cspin" />
               ) : (
@@ -3122,7 +3391,7 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="main">
+      <main className={"main" + (tabInfo?.prod ? " prod" : "")}>
         <div className="tabbar">
           {tabs.map((t) => (
             <div
@@ -3164,6 +3433,16 @@ export default function App() {
         </div>
 
         <div className="toolbar">
+          {tabInfo?.prod && (
+            <span className="envbadge prod" title="connection นี้เป็น production — คำสั่งที่แก้ข้อมูลจะถามก่อนรัน">
+              <ShieldWarning size={14} weight="fill" /> PROD
+            </span>
+          )}
+          {ro && (
+            <span className="envbadge ro" title="connection นี้อ่านได้อย่างเดียว">
+              <LockSimple size={13} weight="fill" /> อ่านอย่างเดียว
+            </span>
+          )}
           <button
             className="btn primary sm"
             onClick={runNow}
@@ -3330,6 +3609,15 @@ export default function App() {
         {tab?.err ? (
           <div className="result">
             <div className="err">{tab.err}</div>
+            {tab.failed && (
+              <div className="errfix">
+                <button className="btn sm" disabled={aiBusy} onClick={fixSql}>
+                  {aiBusy ? <Spinner size={14} className="spin" /> : <Sparkle size={14} weight="duotone" />}
+                  {aiBusy ? "AI กำลังแก้…" : "ให้ AI แก้"}
+                </button>
+                <span>แก้เฉพาะคำสั่งที่ error ใน editor ให้ดูก่อน — ยังไม่รัน</span>
+              </div>
+            )}
           </div>
         ) : tab?.res && !tab.res.columns.length ? (
           <div className="result">
@@ -3374,6 +3662,8 @@ export default function App() {
             onSelect={setSelRows}
             onExportJson={(rows) => exportAs("json", rows)}
             onOrder={tail ? orderBy : undefined}
+            onFilter={tail ? filterBy : undefined}
+            onPasteCells={editable ? pasteInto : undefined}
             serverOrder={tail?.order}
             newCols={editable && tcols[keyId]?.length ? tcols[keyId] : undefined}
             onInsert={insertNew}
@@ -3583,6 +3873,22 @@ export default function App() {
               />
               ใช้ SSL (sslmode=require)
             </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={!!form.prod}
+                onChange={(e) => setForm({ ...form, prod: e.target.checked })}
+              />
+              Production — แถบสีแดง และถามก่อนรันคำสั่งที่แก้ข้อมูล
+            </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={!!form.readonly}
+                onChange={(e) => setForm({ ...form, readonly: e.target.checked })}
+              />
+              อ่านอย่างเดียว — ห้ามแก้ข้อมูลทุกทาง (ถ้าเชื่อมต่ออยู่ ให้ตัดแล้วต่อใหม่)
+            </label>
 
             {test && (
               <div className={"testres " + (test.ok ? "ok" : "bad")}>
@@ -3751,27 +4057,11 @@ export default function App() {
                 </span>
               </label>
             )}
-            <p style={{ marginBottom: 6 }}>
-              พิมพ์ <b>{danger.t.name}</b> เพื่อยืนยัน
-            </p>
-            <input
-              autoFocus
-              value={typed}
-              placeholder={danger.t.name}
-              onChange={(e) => setTyped(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && typed === danger.t.name && runDanger()}
-            />
             <div className="modal-foot">
-              <button className="btn sm" onClick={() => setDanger(null)}>
+              <button className="btn sm" autoFocus onClick={() => setDanger(null)}>
                 ยกเลิก
               </button>
-              <button
-                className="btn primary sm danger"
-                disabled={typed !== danger.t.name}
-                onClick={runDanger}
-              >
-                {danger.op === "truncate" ? "ล้างข้อมูล" : "ลบทิ้ง"}
-              </button>
+              <HoldButton onClick={runDanger}>{danger.op === "truncate" ? "ล้างข้อมูล" : "ลบทิ้ง"}</HoldButton>
             </div>
           </div>
         </div>
@@ -3803,6 +4093,107 @@ export default function App() {
                   setErOpen(false);
                 }}
               />
+            )}
+          </div>
+        </div>
+      )}
+
+      {guard && (
+        <div className="overlay" onClick={() => setGuard(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <Close on={() => setGuard(null)} />
+            <h3>
+              <ShieldWarning size={18} weight="duotone" /> ยืนยันก่อนรัน
+            </h3>
+            {guard.noWhere.length > 0 && (
+              <div className="warn">
+                <div>{[...new Set(guard.noWhere)].map((k) => k.toUpperCase()).join(" / ")} ไม่มี WHERE</div>
+                <div className="path">จะโดนทุกแถวในตาราง ไม่ใช่แค่บางแถว</div>
+              </div>
+            )}
+            {guard.prod && (
+              <div className="warn">
+                <div>กำลังแก้ข้อมูลบน PROD — {conns.find((c) => c.id === guard.conn)?.name}</div>
+                <div className="path">เช็กให้แน่ใจว่าเลือก connection ถูกตัว</div>
+              </div>
+            )}
+            <pre className="donesql">{guard.sql}</pre>
+            <div className="modal-foot">
+              <button className="btn sm" autoFocus onClick={() => setGuard(null)}>
+                ยกเลิก
+              </button>
+              <HoldButton
+                onClick={() => {
+                  const g = guard;
+                  setGuard(null);
+                  run(g.id, g.sql, g.conn, { ok: true, log: g.log });
+                }}
+              >
+                รันเลย
+              </HoldButton>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {qOpen && (
+        <div className="overlay" onClick={() => setQOpen(false)}>
+          <div className="modal wide" onClick={(e) => e.stopPropagation()}>
+            <Close on={() => setQOpen(false)} />
+            <h3>
+              <TerminalWindow size={17} weight="duotone" /> SQL ที่รัน
+            </h3>
+            <p>เก็บในเครื่องนี้ {ranLog.length.toLocaleString()} รายการ (ล่าสุด 500) · ดับเบิลคลิก = เปิดในแท็บใหม่</p>
+            <div className="qsearch">
+              <MagnifyingGlass size={14} />
+              <input
+                autoFocus
+                placeholder="ค้นหา SQL หรือชื่อ connection… (หลายคำได้)"
+                value={qSearch}
+                onChange={(e) => setQSearch(e.target.value)}
+              />
+            </div>
+            <div className="qlist">
+              {(() => {
+                const hits = qh.search(ranLog, qSearch);
+                if (!hits.length)
+                  return <div className="hhint">{ranLog.length ? "ไม่เจอ SQL ที่ตรงกับคำค้น" : "ยังไม่มีประวัติ — กด Run แล้ว SQL จะมาโผล่ที่นี่"}</div>;
+                return hits.slice(0, 200).map((r) => (
+                  <div key={r.id} className={"qrow" + (r.err ? " bad" : "")} onDoubleClick={() => openRan(r, true)}>
+                    <pre>{r.sql}</pre>
+                    <div className="qmeta">
+                      <span>{r.connName}</span>
+                      <span>{when(r.at)}</span>
+                      {r.err ? (
+                        <span className="qerr" title={r.err}>
+                          error
+                        </span>
+                      ) : (
+                        <span>
+                          {r.rows?.toLocaleString()} แถว · {r.ms} ms
+                        </span>
+                      )}
+                      {r.n > 1 && <span>รัน {r.n} ครั้ง</span>}
+                      <button className="btn sm" onClick={() => openRan(r, false)}>
+                        ใส่แทนใน editor
+                      </button>
+                      <button className="btn sm" onClick={() => openRan(r, true)}>
+                        แท็บใหม่
+                      </button>
+                    </div>
+                  </div>
+                ));
+              })()}
+            </div>
+            {ranLog.length > 0 && (
+              <div className="modal-foot">
+                <button
+                  className={"btn sm" + (qClear ? " danger" : "")}
+                  onClick={() => (qClear ? (setRanLog([]), setQClear(false)) : setQClear(true))}
+                >
+                  {qClear ? "กดอีกครั้งเพื่อล้าง" : "ล้างประวัติ SQL"}
+                </button>
+              </div>
             )}
           </div>
         </div>
@@ -3843,6 +4234,8 @@ export default function App() {
                         {e.table}
                         {e.column ? <em>.{e.column}</em> : null}
                         {e.sql ? <em> · {e.count?.toLocaleString()} แถว (SQL)</em> : null}
+                        {e.cells ? <em> · {e.cells.length} ช่อง</em> : null}
+                        {e.keyList ? <em> · {e.keyList.length} แถว</em> : null}
                       </span>
                       <span className="hw">
                         {e.undone ? "ย้อนแล้ว" : e.isRevert ? "เป็นการย้อน" : when(e.at)}
@@ -3882,13 +4275,45 @@ export default function App() {
                           </div>
                         )}
 
-                        {e.kind === "delete" && e.sql && (
+                        {e.cells && (
                           <div className="diff">
-                            <pre className="donesql">{e.sql}</pre>
+                            <div className="drow ok">
+                              <span className="dlab">ย้อนกลับ {e.cells.length} ช่องเป็นค่าเดิม</span>
+                            </div>
+                            <div className="hrows">
+                              <table className="csvprev">
+                                <thead>
+                                  <tr>
+                                    <th>key</th>
+                                    <th>คอลัมน์</th>
+                                    <th>ค่าเดิม (ย้อนไปเป็น)</th>
+                                    <th>ตอนนี้</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {e.cells.slice(0, 50).map((c, i) => (
+                                    <tr key={i}>
+                                      <td>{c.keys.map((k) => hist.show(k.value)).join(", ")}</td>
+                                      <td>{c.column}</td>
+                                      <td className={c.before === null ? "isnull" : ""}>{hist.show(c.before)}</td>
+                                      <td className={c.after === null ? "isnull" : ""}>{hist.show(c.after)}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
+
+                        {((e.kind === "delete" && e.sql) || (e.kind === "insert" && e.keyList)) && (
+                          <div className="diff">
+                            {e.sql && <pre className="donesql">{e.sql}</pre>}
                             {e.rows && e.rows.length > 0 && (
                               <>
-                                <div className="drow ok">
-                                  <span className="dlab">แถวที่จะใส่กลับเข้าไป</span>
+                                <div className={"drow " + (e.kind === "insert" ? "bad" : "ok")}>
+                                  <span className="dlab">
+                                    {e.kind === "insert" ? "แถวที่เพิ่มไป — ย้อนกลับ = ลบทั้งหมดนี้" : "แถวที่จะใส่กลับเข้าไป"}
+                                  </span>
                                   <span className="dval">{e.rows.length.toLocaleString()} แถว</span>
                                 </div>
                                 <div className="hrows">
@@ -4010,9 +4435,9 @@ export default function App() {
               <button className="btn sm" onClick={() => setConfirmDel(null)}>
                 ยกเลิก
               </button>
-              <button className="btn primary sm danger" onClick={doDelete}>
+              <HoldButton onClick={doDelete}>
                 ลบแถว
-              </button>
+              </HoldButton>
             </div>
           </div>
         </div>

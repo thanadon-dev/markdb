@@ -120,3 +120,29 @@ test("ย้อนแถวที่เพิ่ม = ลบด้วย pk, ไ
   assert.deepEqual("cmd" in p && p.args.keys, [{ column: "id", value: "7" }]);
   assert.ok("reason" in revertPlan({ ...base, keys: [{ column: "id", value: null }] }));
 });
+
+test("วางทับหลายช่อง / เพิ่มหลายแถว ย้อนทั้งชุด", () => {
+  const base = { id: "1", at: 0, conn: "c", connName: "dev", table: '"public"."t"' };
+  const k = (v: string | null) => [{ column: "id", value: v }];
+  const upd: Entry = {
+    ...base,
+    kind: "update",
+    cells: [
+      { keys: k("1"), column: "a", before: "x", after: "y" },
+      { keys: k("2"), column: "a", before: null, after: "y" },
+    ],
+  };
+  const p = revertPlan(upd);
+  assert.ok("cmd" in p && p.cmd === "update_cells");
+  assert.deepEqual("cmd" in p && p.args.changes, [
+    { keys: k("1"), column: "a", value: "x" },
+    { keys: k("2"), column: "a", value: null },
+  ]);
+  const back = reverseOf(upd, "2", 1)!;
+  assert.deepEqual(back.cells!.map((c) => [c.before, c.after]), [["y", "x"], ["y", null]]);
+
+  const ins: Entry = { ...base, kind: "insert", keyList: [k("7"), k("8")], rows: [{ id: "7" }, { id: "8" }] };
+  const q = revertPlan(ins);
+  assert.ok("cmd" in q && q.cmd === "delete_rows");
+  assert.ok("reason" in revertPlan({ ...ins, keyList: [k("7"), k(null)] }));
+});

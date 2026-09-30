@@ -62,6 +62,9 @@ export const stmtRangeAt = (doc: string, pos: number) => {
   return hit ? { from: hit.from, to: hit.end } : { from: 0, to: 0 };
 };
 
+/** ทุก statement ใน doc (ไม่มี ; ท้าย) — ใช้ตรวจก่อนรันว่ามีคำสั่งอันตรายไหม */
+export const statements = (doc: string) => split(doc).map((x) => doc.slice(x.from, x.end));
+
 export const stmtAt = (doc: string, pos: number) => {
   const { from, to } = stmtRangeAt(doc, pos);
   return doc.slice(from, to);
