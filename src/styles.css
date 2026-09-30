@@ -2378,3 +2378,54 @@ select:focus {
   opacity: 0.4;
   cursor: default;
 }
+
+.k-insert {
+  background: rgba(134, 239, 172, 0.16);
+  color: #86efac;
+}
+
+/* แถวใหม่ท้ายตาราง — จาง ๆ จนกว่าจะคลิก, เหลืองอ่อน = พิมพ์ค้างยังไม่บันทึก */
+.ghostrow {
+  display: grid;
+  min-width: 100%;
+  width: max-content;
+  opacity: 0.45;
+  cursor: text;
+}
+.ghostrow:hover,
+.ghostrow.on {
+  opacity: 1;
+}
+.ghostrow .cell {
+  border-bottom: 1px dashed #262626;
+}
+.ghostrow .cell.hint {
+  color: var(--dimmer);
+  font-style: italic;
+}
+.ghostrow .cell.off {
+  cursor: not-allowed;
+}
+.ghostrow.dirty .cell {
+  background: rgba(250, 204, 21, 0.07);
+}
+.ghostrow.bad .cell {
+  background: rgba(255, 107, 107, 0.08);
+}
+.ghostrow.saving {
+  opacity: 0.6;
+}
+.ghostrow input::placeholder {
+  color: var(--dimmer);
+  font-style: italic;
+}
+.ghosterr {
+  position: sticky;
+  left: 0;
+  width: max-content;
+  max-width: 100%;
+  padding: 6px 10px;
+  color: var(--red);
+  font-size: 12px;
+  white-space: pre-wrap;
+}

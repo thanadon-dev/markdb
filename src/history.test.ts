@@ -112,3 +112,11 @@ test("DELETE จาก editor ย้อนด้วย insert ทุกแถว
   const big = revertPlan({ ...e, rows: [], partial: true, count: 5000 });
   assert.ok("reason" in big && big.reason.includes("5000"));
 });
+
+test("ย้อนแถวที่เพิ่ม = ลบด้วย pk, ไม่รู้ pk = ย้อนไม่ได้", () => {
+  const base = { id: "1", at: 0, conn: "c", connName: "dev", table: '"public"."t"', kind: "insert" as const };
+  const p = revertPlan({ ...base, keys: [{ column: "id", value: "7" }], row: { id: "7", name: "a" } });
+  assert.ok("cmd" in p && p.cmd === "delete_row");
+  assert.deepEqual("cmd" in p && p.args.keys, [{ column: "id", value: "7" }]);
+  assert.ok("reason" in revertPlan({ ...base, keys: [{ column: "id", value: null }] }));
+});

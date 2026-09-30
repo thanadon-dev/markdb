@@ -10,7 +10,7 @@ export type Entry = {
   conn: string;
   connName: string;
   table: string;
-  kind: "update" | "delete" | "truncate" | "drop";
+  kind: "update" | "delete" | "insert" | "truncate" | "drop";
   /** update: คอลัมน์ที่แก้ */
   column?: string;
   /** update: ค่าก่อนแก้ = ค่าที่จะย้อนกลับไป */
@@ -19,7 +19,7 @@ export type Entry = {
   after?: Val;
   /** pk ของแถวตอนนั้น — ไม่มี = ย้อนไม่ได้ */
   keys?: { column: string; value: Val }[];
-  /** delete: ค่าทั้งแถวที่ถูกลบ */
+  /** delete: ค่าทั้งแถวที่ถูกลบ / insert: แถวที่เพิ่มเข้าไป */
   row?: Record<string, Val>;
   /** delete: เก็บได้แค่คอลัมน์ที่ผลลัพธ์บนจอมี ไม่ใช่ทั้งตาราง
       (DELETE จาก editor: ลบเยอะเกินกว่าที่เก็บไว้ — rows ว่าง ย้อนไม่ได้) */
@@ -37,7 +37,7 @@ export type Entry = {
 };
 
 export type Plan =
-  | { cmd: "update_cell" | "insert_row" | "insert_rows"; args: Record<string, unknown>; summary: string }
+  | { cmd: "update_cell" | "insert_row" | "insert_rows" | "delete_row"; args: Record<string, unknown>; summary: string }
   | { reason: string };
 
 export const KEY = "markdb.history.v1";
@@ -75,6 +75,15 @@ export const revertPlan = (e: Entry): Plan => {
       cmd: "update_cell",
       args: { table: e.table, column: e.column, value: e.before ?? null, keys: e.keys },
       summary: `update ${e.table} set ${e.column} = ${show(e.before)}`,
+    };
+  }
+  if (e.kind === "insert") {
+    if (!e.keys?.length || e.keys.some((k) => k.value === null))
+      return { reason: "ไม่รู้ primary key ของแถวที่เพิ่ม (Redshift ไม่คืนค่าที่ DB สร้างให้) — ลบเองจากตาราง" };
+    return {
+      cmd: "delete_row",
+      args: { table: e.table, keys: e.keys },
+      summary: `delete from ${e.table} where ${e.keys.map((k) => `${k.column} = ${show(k.value)}`).join(" and ")}`,
     };
   }
   if (e.kind === "delete" && e.sql) {
