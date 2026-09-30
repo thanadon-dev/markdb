@@ -100,8 +100,9 @@ fn delete_select(sql: &str) -> Option<(String, String)> {
 async fn run_delete(p: &PgPool, sql: &str, table: String, select: &str) -> R<QueryResult> {
     let t0 = Instant::now();
     let mut tx = p.begin().await.map_err(err)?;
-    let found = sqlx::query(&format!("select * from ({}) _d limit {}", select, KEEP_DELETED + 1))
-        .fetch_all(&mut *tx)
+    // ส่งเป็น &str = simple protocol ค่าทุกคอลัมน์มาเป็น text ให้ row_json อ่านได้
+    let found = (&mut *tx)
+        .fetch_all(format!("select * from ({}) _d limit {}", select, KEEP_DELETED + 1).as_str())
         .await
         .map_err(err)?;
     let affected = (&mut *tx).execute(sql).await.map_err(err)?.rows_affected();
@@ -670,43 +671,35 @@ fn where_keys(keys: &[KeyVal]) -> String {
 
 /// เพิ่มแถวใหม่ — ส่งมาเฉพาะคอลัมน์ที่ผู้ใช้กรอกจริง
 /// คอลัมน์ที่ไม่ได้ส่งมาจะได้ DEFAULT ของตาราง (serial/uuid/now() จึงทำงานตามปกติ)
+/// คืนทั้งแถวที่ DB บันทึกจริง (id/uuid ที่ DB สร้างให้) — Redshift ไม่มี RETURNING จึงคืน None
 #[tauri::command]
 async fn insert_row(
     table: String,
     values: Vec<KeyVal>,
     conn: String,
     state: tauri::State<'_, AppState>,
-) -> R<u64> {
-    let p = pool(&state, &conn).await?;
+) -> R<Option<serde_json::Value>> {
+    insert_one(&db(&state, &conn).await?, &table, &values).await
+}
+
+async fn insert_one(d: &Db, table: &str, values: &[KeyVal]) -> R<Option<serde_json::Value>> {
     let sql = if values.is_empty() {
         format!("insert into {} default values", table)
     } else {
         format!(
             "insert into {} ({}) values ({})",
             table,
-            values
-                .iter()
-                .map(|v| ident(&v.column))
-                .collect::<Vec<_>>()
-                .join(", "),
-            values
-                .iter()
-                .map(|v| lit(&v.value))
-                .collect::<Vec<_>>()
-                .join(", ")
+            values.iter().map(|v| ident(&v.column)).collect::<Vec<_>>().join(", "),
+            values.iter().map(|v| lit(&v.value)).collect::<Vec<_>>().join(", ")
         )
     };
-    let mut tx = p.begin().await.map_err(err)?;
-    match sqlx::query(&sql).execute(&mut *tx).await {
-        Ok(r) => {
-            let n = r.rows_affected();
-            tx.commit().await.map_err(err)?;
-            Ok(n)
-        }
-        Err(e) => {
-            tx.rollback().await.ok();
-            Err(err(e))
-        }
+    // คำสั่งเดียว autocommit ในตัว — พังก็ไม่มีอะไรถูกเขียน
+    if d.engine == Engine::Postgres {
+        let r = d.pool.fetch_one(format!("{} returning *", sql).as_str()).await.map_err(err)?;
+        Ok(Some(row_json(&r)?))
+    } else {
+        sqlx::query(&sql).execute(&d.pool).await.map_err(err)?;
+        Ok(None)
     }
 }
 
@@ -755,8 +748,8 @@ async fn delete_row(
     let mut tx = p.begin().await.map_err(err)?;
     // อ่านทั้งแถวไว้ก่อน ใน transaction เดียวกับที่ลบ — ไม่มีช่องว่างให้แถวเปลี่ยน
     // ระหว่างอ่านกับลบ และไม่ใช้ DELETE ... RETURNING เพราะ Redshift ไม่รองรับ
-    let before = match sqlx::query(&format!("select * from {} where {}", table, where_sql))
-        .fetch_optional(&mut *tx)
+    let before = match (&mut *tx)
+        .fetch_optional(format!("select * from {} where {}", table, where_sql).as_str())
         .await
     {
         Ok(Some(r)) => Some(row_json(&r)?),
@@ -864,6 +857,10 @@ fn cell_json(row: &sqlx::postgres::PgRow, i: usize) -> R<serde_json::Value> {
     let v = row.try_get_raw(i).map_err(err)?;
     if v.is_null() {
         return Ok(serde_json::Value::Null);
+    }
+    // ผ่าน sqlx::query (extended protocol) ค่าจะมาเป็น binary — อ่านเป็น text ได้ขยะ ต้องไม่เงียบ
+    if v.format() != sqlx::postgres::PgValueFormat::Text {
+        return Err("อ่านค่าแบบ binary ไม่ได้ — ต้อง query ผ่าน simple protocol (&str)".into());
     }
     let ty = v.type_info().name().to_ascii_uppercase();
     let text = v.as_str().map_err(err)?.to_string();
@@ -1625,9 +1622,35 @@ mod tests {
         assert!(!d.partial);
         assert_eq!(d.rows.len(), 2);
         assert_eq!(d.rows[1]["note"], serde_json::json!("o'b"));
+        assert_eq!(d.rows[0]["id"], serde_json::json!(2));
+        assert_eq!(d.rows[0]["ok"], serde_json::json!(false));
         let left: (i64,) = sqlx::query_as("select count(*) from markdb_del_t").fetch_one(&p).await.unwrap();
         assert_eq!(left.0, 1);
         p.execute("drop table markdb_del_t").await.unwrap();
+    }
+
+    /// แถวใหม่ท้ายตาราง: ได้ค่าที่ DB สร้างเอง (serial, default) กลับมา ไม่ใช่แค่ที่พิมพ์
+    #[tokio::test]
+    #[ignore]
+    async fn insert_returns_saved_row() {
+        let base = std::env::var("MARKDB_TEST_PG").expect("ตั้ง MARKDB_TEST_PG ก่อน");
+        let p = PgPool::connect(&format!("{}/postgres", base)).await.unwrap();
+        p.execute("drop table if exists markdb_ins_t; create table markdb_ins_t (id serial primary key, uid uuid default gen_random_uuid(), name text not null, ok bool default true, at timestamp default now())")
+            .await
+            .unwrap();
+        let d = Db { pool: p.clone(), engine: Engine::Postgres };
+        let kv = |c: &str, v: Option<&str>| KeyVal { column: c.into(), value: v.map(|s| s.into()) };
+        let r = insert_one(&d, "markdb_ins_t", &[kv("name", Some("o'b"))]).await.unwrap().unwrap();
+        assert_eq!(r["id"], serde_json::json!(1));
+        assert_eq!(r["name"], serde_json::json!("o'b"));
+        assert_eq!(r["ok"], serde_json::json!(true));
+        assert_eq!(r["uid"].as_str().unwrap().len(), 36);
+        assert!(!r["at"].is_null());
+        // ติด NOT NULL → error และไม่มีแถวค้าง
+        assert!(insert_one(&d, "markdb_ins_t", &[kv("name", None)]).await.is_err());
+        let n: (i64,) = sqlx::query_as("select count(*) from markdb_ins_t").fetch_one(&p).await.unwrap();
+        assert_eq!(n.0, 1);
+        p.execute("drop table markdb_ins_t").await.unwrap();
     }
 
     #[test]

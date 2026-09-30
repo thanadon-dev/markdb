@@ -8,6 +8,7 @@ import { listen } from "@tauri-apps/api/event";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { stmtAt, stmtRangeAt, targetTable } from "./sqlsplit";
 import { parseTail, quoteIdent, withTail } from "./sqltail";
+import { suggest } from "./newrow";
 import * as hist from "./history";
 import { PostgreSQL, sql as sqlLang } from "@codemirror/lang-sql";
 import { createTheme } from "@uiw/codemirror-themes";
@@ -431,6 +432,7 @@ const stmtHighlight = ViewPlugin.fromClass(
 const KIND: Record<hist.Entry["kind"], string> = {
   update: "UPDATE",
   delete: "DELETE",
+  insert: "INSERT",
   truncate: "TRUNCATE",
   drop: "DROP",
 };
@@ -1166,6 +1168,8 @@ const Grid = memo(function Grid({
   onExportJson,
   onOrder,
   serverOrder,
+  newCols,
+  onInsert,
 }: {
   res: QueryResult;
   pk: string[];
@@ -1180,6 +1184,10 @@ const Grid = memo(function Grid({
   onOrder?: (col: string, dir: "asc" | "desc" | null) => void;
   /** order by ที่อยู่ใน SQL ตอนนี้ ไว้โชว์ลูกศรที่หัวคอลัมน์ */
   serverOrder?: string | null;
+  /** คอลัมน์ของตารางเป้าหมาย (type/default) — มี = โชว์แถวใหม่จาง ๆ ท้ายตารางให้พิมพ์เพิ่มแถวได้ */
+  newCols?: ColumnInfo[];
+  /** insert แถวใหม่ — ค่าว่าง = ไม่ส่ง ให้ DB ใส่ DEFAULT, "NULL" = null; throw = error ไปโชว์ที่แถว */
+  onInsert?: (vals: Record<string, string>) => Promise<void>;
 }) {
   const parent = useRef<HTMLDivElement>(null);
   // cur ชี้ด้วย "ลำดับที่เห็นบนจอ" (index ใน order) ไม่ใช่ index จริงของแถว
@@ -1199,6 +1207,16 @@ const Grid = memo(function Grid({
   const [headMenu, setHeadMenu] = useState<{ x: number; y: number; col: string } | null>(null);
   const [colDrag, setColDrag] = useState<{ col: string; over: string | null } | null>(null);
   const colDown = useRef<{ col: string; x: number } | null>(null);
+  // แถวใหม่ท้ายตาราง: ghost = ค่าที่พิมพ์ค้างไว้ (null = ยังไม่ได้เริ่ม), gcol = ช่องที่กำลังพิมพ์
+  const [ghost, setGhost] = useState<Record<string, string> | null>(null);
+  const [gcol, setGcol] = useState(0);
+  const [gerr, setGerr] = useState("");
+  const [gsaving, setGsaving] = useState(false);
+  const ghostEl = useRef<HTMLDivElement>(null);
+  const colMeta = useMemo(
+    () => Object.fromEntries((newCols ?? []).map((c) => [c.name, c])) as Record<string, ColumnInfo>,
+    [newCols],
+  );
   const cols = useMemo(
     () => (colOrder ?? res.columns).filter((c) => !hidden.has(c)),
     [colOrder, hidden, res.columns],
@@ -1248,6 +1266,8 @@ const Grid = memo(function Grid({
     setSel(new Set());
     setColOrder(null);
     setHidden(new Set());
+    setGhost(null);
+    setGerr("");
   }, [res.columns]);
 
   // ปล่อยเมาส์นอกตารางก็ต้องจบการลาก ไม่งั้นค้างคลุมตามเมาส์ต่อ
@@ -1516,6 +1536,140 @@ const Grid = memo(function Grid({
     }
   };
 
+  /* ---------- แถวใหม่ท้ายตาราง ---------- */
+  const ghostOn = !!onInsert && !!newCols && mode === "grid";
+  const startGhost = (ci: number) => {
+    setGhost((g) => g ?? {});
+    setGcol(ci);
+    setCur(null);
+    setMark(null);
+    setEditing(false);
+  };
+  const closeGhost = () => {
+    setGhost(null);
+    setGerr("");
+    parent.current?.focus();
+  };
+  /* Enter หรือคลิกออกนอกแถว = insert ทันที, ยังไม่ได้พิมพ์อะไรเลย = แค่ปิด */
+  const saveGhost = async () => {
+    if (!ghost || !onInsert || gsaving) return;
+    if (!Object.values(ghost).some((v) => v !== "")) return closeGhost();
+    setGsaving(true);
+    setGerr("");
+    try {
+      await onInsert(ghost);
+      // พร้อมพิมพ์แถวต่อไปเลย — แถวที่เพิ่งบันทึกไปต่อท้ายตาราง ต้องเลื่อนตามลงไป
+      setGhost({});
+      // แถวถัดไปเริ่มที่ช่องแรกที่ต้องพิมพ์เอง ข้าม id ที่ DB รันให้
+      const first = cols.findIndex((c) => colMeta[c] && suggest(colMeta[c]).hint !== "auto");
+      setGcol(Math.max(0, first));
+      requestAnimationFrame(() => parent.current && (parent.current.scrollTop = parent.current.scrollHeight));
+    } catch (e) {
+      setGerr(String(e)); // ค่าที่พิมพ์ยังอยู่ แก้แล้วกด Enter ใหม่ได้
+    } finally {
+      setGsaving(false);
+    }
+  };
+  const saveRef = useRef(saveGhost);
+  saveRef.current = saveGhost;
+  const gerrRef = useRef(gerr);
+  gerrRef.current = gerr;
+  const ghostOpen = ghost !== null;
+  useEffect(() => {
+    if (!ghostOpen) return;
+    const down = (e: MouseEvent) => {
+      // พังไปแล้วรอบนึงก็ไม่ลองซ้ำทุกคลิก — ให้ผู้ใช้แก้ค่าหรือกด Esc เอง
+      if (!ghostEl.current?.contains(e.target as Node) && !gerrRef.current) saveRef.current();
+    };
+    window.addEventListener("mousedown", down);
+    return () => window.removeEventListener("mousedown", down);
+  }, [ghostOpen]);
+
+  const setG = (c: string, v: string) => {
+    setGhost((g) => ({ ...(g ?? {}), [c]: v }));
+    setGerr("");
+  };
+  const ghostKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    e.stopPropagation(); // ไม่ให้ไปโดนคีย์ลัดของตาราง (ลูกศร/พิมพ์ทับ)
+    const c = cols[gcol];
+    const k = e.key;
+    if (k === "Tab") {
+      e.preventDefault();
+      // ช่องว่าง + Tab = รับค่าที่แนะนำ (uuid, เวลาตอนนี้, default) แล้วไปช่องถัดไป
+      if (!e.shiftKey && !(ghost?.[c] ?? "") && colMeta[c]) {
+        const f = suggest(colMeta[c]).fill;
+        if (f !== null) setG(c, f);
+      }
+      const n = cols.length;
+      let i = gcol;
+      do i = (i + (e.shiftKey ? -1 : 1) + n) % n;
+      while (!colMeta[cols[i]] && i !== gcol);
+      setGcol(i);
+    } else if (k === "Enter") {
+      e.preventDefault();
+      saveGhost();
+    } else if (k === "Escape") {
+      e.preventDefault();
+      closeGhost();
+    } else if ((e.ctrlKey || e.metaKey) && k.toLowerCase() === "d") {
+      // Ctrl+D = เอาค่าจากแถวสุดท้ายที่เห็นลงมา เหมือน Excel
+      e.preventDefault();
+      const last = order[order.length - 1];
+      if (last !== undefined) {
+        const v = res.rows[last][c];
+        setG(c, v === null || v === undefined ? "NULL" : cellText(v));
+      }
+    }
+  };
+  const dirty = !!ghost && Object.values(ghost).some((v) => v !== "");
+  const ghostRow = ghostOn && (
+    <div
+      ref={ghostEl}
+      className={
+        "ghostrow" + (ghost ? " on" : "") + (dirty ? " dirty" : "") + (gerr ? " bad" : "") + (gsaving ? " saving" : "")
+      }
+      style={{ gridTemplateColumns: template }}
+    >
+      {cols.map((c, ci) => {
+        const m = colMeta[c];
+        const hint = m ? suggest(m).hint : "";
+        if (ghost && gcol === ci && m)
+          return (
+            <div key={c} className="cell editing">
+              <input
+                autoFocus
+                value={ghost[c] ?? ""}
+                placeholder={hint}
+                disabled={gsaving}
+                onChange={(e) => setG(c, e.target.value)}
+                onKeyDown={ghostKey}
+              />
+            </div>
+          );
+        const v = ghost?.[c] ?? "";
+        return (
+          <div
+            key={c}
+            className={"cell" + (v ? "" : " hint") + (m ? "" : " off")}
+            title={
+              m
+                ? `${c} · ${m.data_type}${m.default ? ` · default ${m.default}` : ""}${m.nullable ? "" : " · NOT NULL"}
+Tab = เติมค่าที่แนะนำ · Enter = บันทึก · Esc = ยกเลิก · Ctrl+D = ค่าจากแถวบน`
+                : `${c} ไม่ใช่คอลัมน์ของตาราง ใส่ค่าไม่ได้`
+            }
+            onMouseDown={(e) => {
+              if (e.button !== 0) return;
+              e.preventDefault();
+              if (m) startGhost(ci);
+            }}
+          >
+            {v || (!ghost && ci === 0 ? "＋ แถวใหม่" : hint)}
+          </div>
+        );
+      })}
+    </div>
+  );
+
   /* โหมด record — หนึ่งแถว คอลัมน์เรียงลงมา ใช้ cur ตัวเดียวกับ grid
      สลับโหมดไปมาจึงยังยืนอยู่ที่แถวเดิม */
   if (mode === "record") {
@@ -1635,7 +1789,7 @@ const Grid = memo(function Grid({
           );
         })}
       </div>
-      {!order.length && <div className="nomatch">ไม่มีแถวที่ตรงกับ “{filter}”</div>}
+      {!order.length && filter && <div className="nomatch">ไม่มีแถวที่ตรงกับ “{filter}”</div>}
       <div className="grid-body" style={{ height: rv.getTotalSize() }}>
         {rv.getVirtualItems().map((vi) => {
           const ri = order[vi.index];
@@ -1721,6 +1875,8 @@ const Grid = memo(function Grid({
           />
         )}
       </div>
+      {ghostRow}
+      {gerr && <div className="ghosterr">{gerr}</div>}
 
       {menu && (
         <>
@@ -1864,6 +2020,8 @@ export default function App() {
   const [typed, setTyped] = useState("");
   const [cascade, setCascade] = useState(false);
   const [edges, setEdges] = useState<Edge[] | null>(null);
+  // คอลัมน์ของตาราง (type/default) ไว้ให้แถวใหม่ท้ายตารางใช้บอกใบ้ — key เดียวกับ keys
+  const [tcols, setTcols] = useState<Record<string, ColumnInfo[]>>({});
   const [addRow, setAddRow] = useState<{ cols: ColumnInfo[]; vals: Record<string, string> } | null>(
     null,
   );
@@ -1920,6 +2078,17 @@ export default function App() {
   const missingKeys = (rowKey ?? []).filter((k) => !tab?.res?.columns.includes(k));
 
   const editable = !!(tab?.res?.columns.length && rowKey?.length && !missingKeys.length);
+
+  useEffect(() => {
+    if (!editable || !keyId || tcols[keyId] !== undefined) return;
+    let alive = true;
+    invoke<TableProps>("table_props", { conn: tabConn, table: target })
+      .then((d) => alive && setTcols((m) => ({ ...m, [keyId]: d.columns })))
+      .catch(() => alive && setTcols((m) => ({ ...m, [keyId]: [] })));
+    return () => {
+      alive = false;
+    };
+  }, [editable, keyId, target, tabConn, tcols]);
 
   const editReason = !tab?.res?.columns.length
     ? ""
@@ -2121,22 +2290,6 @@ export default function App() {
     }
   }, [tab, target, say]);
 
-  const saveNewRow = useCallback(async () => {
-    if (!addRow || !tab || !target) return;
-    // ส่งเฉพาะช่องที่กรอกจริง — ที่เหลือปล่อยให้ DEFAULT ของตารางทำงาน
-    const values = Object.entries(addRow.vals)
-      .filter(([, v]) => v !== "")
-      .map(([column, v]) => ({ column, value: v.toUpperCase() === "NULL" ? null : v }));
-    try {
-      await invoke("insert_row", { conn: tab.conn, table: target, values });
-      setAddRow(null);
-      say("เพิ่มแถวแล้ว");
-      if (tab.ran && isSelect(tab.ran)) run(tab.id, tab.ran);
-    } catch (e) {
-      say(String(e));
-    }
-  }, [addRow, tab, target, run, say]);
-
   const copy = useCallback(
     (txt: string, what: string) => {
       navigator.clipboard?.writeText(txt);
@@ -2310,6 +2463,49 @@ export default function App() {
     },
     [tab, target, rowKey, patch, pkKeys, say, logIt],
   );
+
+  /* แถวใหม่ท้ายตาราง: insert แล้วต่อท้ายผลลัพธ์บนจอเลย ไม่รัน query ใหม่
+     (มี limit/order by อยู่ แถวที่เพิ่งเพิ่มอาจไปอยู่หน้าอื่นจนดูเหมือนหาย) */
+  const insertNew = useCallback(
+    async (vals: Record<string, string>) => {
+      if (!tab || !target) return;
+      const values = Object.entries(vals)
+        .filter(([, v]) => v !== "")
+        .map(([column, v]) => ({ column, value: v.toUpperCase() === "NULL" ? null : v }));
+      // Postgres คืนทั้งแถวที่บันทึกจริง (id/uuid ที่ DB สร้าง) — Redshift คืน null ใช้ค่าที่พิมพ์แทน
+      const saved = await invoke<Record<string, unknown> | null>("insert_row", {
+        conn: tab.conn,
+        table: target,
+        values,
+      });
+      const row = saved ?? Object.fromEntries(values.map((v) => [v.column, v.value]));
+      logIt(
+        {
+          kind: "insert",
+          table: target,
+          keys: pkKeys(row),
+          row: Object.fromEntries(Object.entries(row).map(([k, v]) => [k, asVal(v)])),
+        },
+        tab.conn,
+      );
+      setTabs((ts) =>
+        ts.map((t) => (t.id === tab.id && t.res ? { ...t, res: { ...t.res, rows: [...t.res.rows, row] } } : t)),
+      );
+      say("เพิ่มแถวแล้ว");
+    },
+    [tab, target, pkKeys, logIt, say],
+  );
+
+  /* ฟอร์ม Add row — ส่งเฉพาะช่องที่กรอกจริง ที่เหลือปล่อยให้ DEFAULT ของตารางทำงาน */
+  const saveNewRow = useCallback(async () => {
+    if (!addRow) return;
+    try {
+      await insertNew(addRow.vals);
+      setAddRow(null);
+    } catch (e) {
+      say(String(e));
+    }
+  }, [addRow, insertNew, say]);
 
   const addTab = useCallback(() => {
     const nt = newTab(activeConn);
@@ -3179,6 +3375,8 @@ export default function App() {
             onExportJson={(rows) => exportAs("json", rows)}
             onOrder={tail ? orderBy : undefined}
             serverOrder={tail?.order}
+            newCols={editable && tcols[keyId]?.length ? tcols[keyId] : undefined}
+            onInsert={insertNew}
             onCopy={(txt) => {
               navigator.clipboard?.writeText(txt);
               say("คัดลอกแล้ว");
@@ -3723,13 +3921,15 @@ export default function App() {
                           </div>
                         )}
 
-                        {e.kind === "delete" && e.row && (
+                        {(e.kind === "delete" || e.kind === "insert") && e.row && (
                           <div className="diff">
-                            <div className="drow ok">
-                              <span className="dlab">แถวที่จะใส่กลับเข้าไป</span>
+                            <div className={"drow " + (e.kind === "insert" ? "bad" : "ok")}>
+                              <span className="dlab">
+                                {e.kind === "insert" ? "แถวที่เพิ่มไป — ย้อนกลับ = ลบแถวนี้" : "แถวที่จะใส่กลับเข้าไป"}
+                              </span>
                               <span className="dval">
                                 {Object.keys(e.row).length} คอลัมน์
-                                {e.partial ? " (เท่าที่ผลลัพธ์บนจอมี)" : " — ครบทั้งตาราง"}
+                                {e.kind === "insert" ? "" : e.partial ? " (เท่าที่ผลลัพธ์บนจอมี)" : " — ครบทั้งตาราง"}
                               </span>
                             </div>
                             <div className="hrow">
