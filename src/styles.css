@@ -288,7 +288,16 @@ select:focus {
   padding: 8px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-2);
+}
+
+/* แท็บ query เลื่อนแนวนอนเองในกล่องนี้ — Close all / New Query อยู่นิ่งสองข้าง */
+.tabscroll {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
   overflow-x: auto;
+  scrollbar-width: none;
 }
 
 .tab {
@@ -2564,4 +2573,47 @@ select:focus {
   to {
     transform: scaleX(1);
   }
+}
+
+/* กลุ่ม connection — host เดียวกันอยู่ด้วยกัน */
+.cgroup + .cgroup {
+  margin-top: 6px;
+}
+.cghead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 2px;
+  font-size: 10.5px;
+  color: var(--dimmer);
+}
+.cghead span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cghead em {
+  font-style: normal;
+  opacity: 0.7;
+}
+.cghead button {
+  display: flex;
+  margin-left: auto;
+  padding: 2px;
+  border-radius: 4px;
+  color: var(--dim);
+  opacity: 0;
+}
+.cghead:hover button {
+  opacity: 1;
+}
+.cghead button:hover {
+  color: var(--text);
+  background: var(--accent-soft);
+}
+.cghead input {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 6px;
+  font-size: 11px;
 }
