@@ -11,6 +11,7 @@ import { addWhere, filterCond, parseTail, quoteIdent, withTail, type FilterOp } 
 import { parseTsv, pasteCells, suggest } from "./newrow";
 import { risk } from "./guard";
 import * as qh from "./queries";
+import { grouped, renameGroup } from "./groups";
 import * as hist from "./history";
 import { PostgreSQL, sql as sqlLang } from "@codemirror/lang-sql";
 import { createTheme } from "@uiw/codemirror-themes";
@@ -167,6 +168,8 @@ type Conn = {
   prod?: boolean;
   /** อ่านอย่างเดียว: ห้ามแก้ข้อมูลทุกทาง (Postgres บังคับที่ระดับ session ด้วย) */
   readonly?: boolean;
+  /** กลุ่มในแถบซ้าย — ว่าง = จัดกลุ่มตาม host อัตโนมัติ */
+  group?: string;
 };
 
 const CONNS_KEY = "markdb.conns";
@@ -2147,6 +2150,9 @@ export default function App() {
   const [logSel, setLogSel] = useState<string | null>(null);
   const [clearArm, setClearArm] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
+  const tabScroll = useRef<HTMLDivElement>(null);
+  // กำลังเปลี่ยนชื่อกลุ่ม connection (from = ชื่อเดิม)
+  const [gRename, setGRename] = useState<{ from: string; to: string } | null>(null);
   // ด่านก่อนรัน: UPDATE/DELETE ไม่มี WHERE หรือแก้ข้อมูลบน PROD — รอผู้ใช้กดยืนยัน
   const [guard, setGuard] = useState<{
     id: string;
@@ -2268,6 +2274,10 @@ export default function App() {
   }, [tab?.id, tab?.res]);
 
   useEffect(() => setActiveTab((a) => a || tabs[0].id), [tabs]);
+  // แท็บที่เลือก/เพิ่งเปิดอาจอยู่นอกจอ — เลื่อนให้เห็น
+  useEffect(() => {
+    tabScroll.current?.querySelector(`[data-id="${activeTab}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activeTab, tabs.length]);
   useEffect(() => {
     getVersion().then(setVersion).catch(() => {});
   }, []);
@@ -3239,59 +3249,93 @@ export default function App() {
               <Plus size={14} weight="bold" />
             </button>
           </div>
-          {conns.map((c) => (
-            <button
-              key={c.id}
-              className={"conn" + (activeConn === c.id ? " on" : "")}
-              title={connUrl(c)}
-              onClick={() => (live[c.id] ? setActiveConn(c.id) : !connecting && doConnect(c))}
-            >
-              <EngineLogo engine={c.engine ?? "postgres"} size={15} />
-              <span>{c.name}</span>
-              {c.prod && <em className="envtag prod">PROD</em>}
-              {c.readonly && <em className="envtag ro">RO</em>}
-              {connecting === c.id ? (
-                <Spinner size={12} className="spin cspin" />
-              ) : (
-                <span className={"cdot" + (live[c.id] ? " on" : "")} />
-              )}
-              {live[c.id] && (
-                <span
-                  className="x"
-                  title="ตัดการเชื่อมต่อ"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    dropConn(c.id);
-                  }}
+          {grouped(conns).map((g) => {
+            const saveName = () => {
+              if (gRename && gRename.to.trim() !== g.name) setConns((cs) => renameGroup(cs, g.name, gRename.to));
+              setGRename(null);
+            };
+            return (
+              <div key={g.name} className="cgroup">
+                <div className="cghead">
+                  {gRename?.from === g.name ? (
+                    <input
+                      autoFocus
+                      value={gRename.to}
+                      placeholder="ว่าง = จัดกลุ่มตาม host"
+                      onChange={(e) => setGRename({ from: g.name, to: e.target.value })}
+                      onBlur={saveName}
+                      onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === "Enter") saveName();
+                        if (e.key === "Escape") setGRename(null);
+                      }}
+                    />
+                  ) : (
+                    <>
+                      <span title={g.name}>{g.name}</span>
+                      <em>{g.items.length}</em>
+                      <button title="เปลี่ยนชื่อกลุ่ม" onClick={() => setGRename({ from: g.name, to: g.name })}>
+                        <PencilSimple size={11} />
+                      </button>
+                    </>
+                  )}
+                </div>
+                {g.items.map((c) => (
+                <button
+                  key={c.id}
+                  className={"conn" + (activeConn === c.id ? " on" : "")}
+                  title={connUrl(c)}
+                  onClick={() => (live[c.id] ? setActiveConn(c.id) : !connecting && doConnect(c))}
                 >
-                  <Plug size={13} />
-                </span>
-              )}
-              <span
-                className="x"
-                title="แก้ไข"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setTest(null);
-                  setForm(c);
-                }}
-              >
-                <PencilSimple size={13} />
-              </span>
-              <span
-                className="x"
-                style={{ marginLeft: 4 }}
-                title="ลบ"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  dropConn(c.id);
-                  setConns((cs) => cs.filter((x) => x.id !== c.id));
-                }}
-              >
-                <Trash size={13} />
-              </span>
-            </button>
-          ))}
+                  <EngineLogo engine={c.engine ?? "postgres"} size={15} />
+                  <span>{c.name}</span>
+                  {c.prod && <em className="envtag prod">PROD</em>}
+                  {c.readonly && <em className="envtag ro">RO</em>}
+                  {connecting === c.id ? (
+                    <Spinner size={12} className="spin cspin" />
+                  ) : (
+                    <span className={"cdot" + (live[c.id] ? " on" : "")} />
+                  )}
+                  {live[c.id] && (
+                    <span
+                      className="x"
+                      title="ตัดการเชื่อมต่อ"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        dropConn(c.id);
+                      }}
+                    >
+                      <Plug size={13} />
+                    </span>
+                  )}
+                  <span
+                    className="x"
+                    title="แก้ไข"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setTest(null);
+                      setForm(c);
+                    }}
+                  >
+                    <PencilSimple size={13} />
+                  </span>
+                  <span
+                    className="x"
+                    style={{ marginLeft: 4 }}
+                    title="ลบ"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      dropConn(c.id);
+                      setConns((cs) => cs.filter((x) => x.id !== c.id));
+                    }}
+                  >
+                    <Trash size={13} />
+                  </span>
+                </button>
+                ))}
+              </div>
+            );
+          })}
           {!conns.length && (
             <div style={{ color: "var(--dim)", padding: "6px 10px", fontSize: 12 }}>
               ยังไม่มี — กด + เพื่อเพิ่ม
@@ -3393,9 +3437,20 @@ export default function App() {
 
       <main className={"main" + (tabInfo?.prod ? " prod" : "")}>
         <div className="tabbar">
+          <button
+            className="btn sm"
+            onClick={closeAll}
+            disabled={tabs.length === 1 && !tabs[0].sql}
+            title="ปิดแท็บ query ทั้งหมด"
+          >
+            <X size={14} weight="bold" /> Close all
+          </button>
+          {/* แท็บเยอะเกินจอ: หมุนลูกกลิ้งเลื่อนซ้าย-ขวาได้ */}
+          <div className="tabscroll" ref={tabScroll} onWheel={(e) => (e.currentTarget.scrollLeft += e.deltaY || e.deltaX)}>
           {tabs.map((t) => (
             <div
               key={t.id}
+              data-id={t.id}
               className={"tab" + (t.id === tab?.id ? " on" : "")}
               onClick={() => setActiveTab(t.id)}
             >
@@ -3419,16 +3474,9 @@ export default function App() {
               </span>
             </div>
           ))}
+          </div>
           <button className="btn primary sm newq" onClick={addTab} title="New Query (Ctrl+N)">
             <Plus size={15} weight="bold" /> New Query
-          </button>
-          <button
-            className="btn sm"
-            onClick={closeAll}
-            disabled={tabs.length === 1 && !tabs[0].sql}
-            title="ปิดแท็บ query ทั้งหมด"
-          >
-            <X size={14} weight="bold" /> Close all
           </button>
         </div>
 
@@ -3863,6 +3911,21 @@ export default function App() {
             <div className="field">
               <label>Database</label>
               <input value={form.db} onChange={(e) => setForm({ ...form, db: e.target.value })} />
+            </div>
+
+            <div className="field">
+              <label>Group</label>
+              <input
+                list="conn-groups"
+                value={form.group ?? ""}
+                placeholder={`ว่าง = จัดกลุ่มตาม host (${form.host || "—"})`}
+                onChange={(e) => setForm({ ...form, group: e.target.value })}
+              />
+              <datalist id="conn-groups">
+                {grouped(conns).map((g) => (
+                  <option key={g.name} value={g.name} />
+                ))}
+              </datalist>
             </div>
 
             <label className="check">
