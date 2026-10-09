@@ -2153,6 +2153,15 @@ export default function App() {
   const tabScroll = useRef<HTMLDivElement>(null);
   // กำลังเปลี่ยนชื่อกลุ่ม connection (from = ชื่อเดิม)
   const [gRename, setGRename] = useState<{ from: string; to: string } | null>(null);
+  // กลุ่ม connection ที่พับไว้ — จำข้ามการเปิดแอป
+  const [folded, setFolded] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("markdb.folded") || "[]");
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => localStorage.setItem("markdb.folded", JSON.stringify(folded)), [folded]);
   // ด่านก่อนรัน: UPDATE/DELETE ไม่มี WHERE หรือแก้ข้อมูลบน PROD — รอผู้ใช้กดยืนยัน
   const [guard, setGuard] = useState<{
     id: string;
@@ -3251,7 +3260,11 @@ export default function App() {
           </div>
           {grouped(conns).map((g) => {
             const saveName = () => {
-              if (gRename && gRename.to.trim() !== g.name) setConns((cs) => renameGroup(cs, g.name, gRename.to));
+              if (gRename && gRename.to.trim() !== g.name) {
+                setConns((cs) => renameGroup(cs, g.name, gRename.to));
+                // พับอยู่ก็ให้ยังพับอยู่หลังเปลี่ยนชื่อ
+                setFolded((f) => f.map((x) => (x === g.name ? gRename.to.trim() : x)));
+              }
               setGRename(null);
             };
             return (
@@ -3272,7 +3285,14 @@ export default function App() {
                     />
                   ) : (
                     <>
-                      <span title={g.name}>{g.name}</span>
+                      <span
+                        className="cgname"
+                        title={`${g.name} — คลิกเพื่อพับ/กาง`}
+                        onClick={() => setFolded((f) => (f.includes(g.name) ? f.filter((x) => x !== g.name) : [...f, g.name]))}
+                      >
+                        <CaretRight size={9} weight="bold" className={folded.includes(g.name) ? "" : "open"} />
+                        {g.name}
+                      </span>
                       <em>{g.items.length}</em>
                       <button title="เปลี่ยนชื่อกลุ่ม" onClick={() => setGRename({ from: g.name, to: g.name })}>
                         <PencilSimple size={11} />
@@ -3280,7 +3300,7 @@ export default function App() {
                     </>
                   )}
                 </div>
-                {g.items.map((c) => (
+                {!folded.includes(g.name) && g.items.map((c) => (
                 <button
                   key={c.id}
                   className={"conn" + (activeConn === c.id ? " on" : "")}

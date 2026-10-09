@@ -2617,3 +2617,20 @@ select:focus {
   padding: 2px 6px;
   font-size: 11px;
 }
+.cghead .cgname {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.cghead .cgname:hover {
+  color: var(--text);
+}
+.cghead .cgname svg {
+  flex: none;
+  transition: transform 0.12s;
+}
+.cghead .cgname svg.open {
+  transform: rotate(90deg);
+}
