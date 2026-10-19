@@ -23,3 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 release-v*/
+
+# กัน key / รหัสหลุดเข้า repo
+*.key
+.env*

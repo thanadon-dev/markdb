@@ -2,7 +2,8 @@
 name = "markdb"
 version = "0.1.0"
 description = "MarkDB - fast modern postgres client"
-authors = ["you"]
+authors = ["thanadon-dev"]
+license = "MIT"
 edition = "2021"
 
 [lib]
