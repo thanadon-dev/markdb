@@ -108,7 +108,7 @@ MARKDB_TEST_PG=postgres://user:pass@localhost:5432/db cargo test -- --ignored
 | `src/*.ts` | logic ล้วนที่เทสต์ได้ เช่น ตัดคำสั่ง SQL (`sqlsplit`), เติม where/order/limit (`sqltail`), กันพลาด (`guard`), ประวัติ (`history`, `queries`) |
 | `src/styles.css` | ธีม |
 
-## ร่วมพัฒนา
+## การร่วมพัฒนา
 
 ยินดีรับ issue และ pull request อ่านวิธีตั้งเครื่อง แนวทางเขียนโค้ด และขั้นตอนส่ง PR ได้ที่ [CONTRIBUTING.md](CONTRIBUTING.md)
 พบช่องโหว่ด้านความปลอดภัย อย่าเปิดเป็น issue สาธารณะ ให้แจ้งตาม [SECURITY.md](SECURITY.md)
