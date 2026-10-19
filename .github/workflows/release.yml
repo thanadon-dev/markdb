@@ -1,11 +1,9 @@
 name: release
 
-# tag เวอร์ชันใหม่ (เช่น v0.1.1) แล้ว workflow นี้จะ build, เซ็น, ปล่อย Release
-# พร้อม latest.json ที่ตัวแอปใช้เช็คอัปเดต
+# build, เซ็น, ปล่อย Release พร้อม latest.json ที่ตัวแอปใช้เช็คอัปเดต
+# รันเองจากแท็บ Actions เท่านั้น — ตอนนี้ release ทำในเครื่อง maintainer
+# (ปลด push tags ออก ไม่งั้นทุก tag ขึ้นกากบาทแดงตอน Actions ใช้ไม่ได้)
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
 
 jobs:

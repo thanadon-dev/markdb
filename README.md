@@ -2,119 +2,120 @@
 
 # MarkDB
 
-**SQL client ที่เบาและเร็ว สำหรับ PostgreSQL และ Amazon Redshift**
+**A lightweight, fast SQL client for PostgreSQL and Amazon Redshift**
 
 [![release](https://img.shields.io/github/v/release/thanadon-dev/markdb?style=flat-square&color=222)](https://github.com/thanadon-dev/markdb/releases/latest)
 [![downloads](https://img.shields.io/github/downloads/thanadon-dev/markdb/total?style=flat-square&color=222)](https://github.com/thanadon-dev/markdb/releases)
+[![license](https://img.shields.io/github/license/thanadon-dev/markdb?style=flat-square&color=222)](LICENSE)
 ![platform](https://img.shields.io/badge/Windows-x64-222?style=flat-square)
 ![stack](https://img.shields.io/badge/Tauri_v2_·_Rust_·_React-222?style=flat-square)
 
-[ดาวน์โหลดเวอร์ชันล่าสุด](https://github.com/thanadon-dev/markdb/releases/latest)
+[Download the latest version](https://github.com/thanadon-dev/markdb/releases/latest)
+
+**English** · [ภาษาไทย](README.th.md)
 
 </div>
 
 ---
 
-## ทำไมต้อง MarkDB
+## Why MarkDB
 
-ตัวติดตั้งไม่ถึง 5 MB เปิดเร็ว กินแรมน้อย เพราะใช้ Tauri (WebView ของระบบ + Rust) แทน Electron หรือ Java
+The installer is under 5 MB. It starts fast and uses little memory, because it runs on Tauri (the system WebView plus Rust) instead of Electron or Java.
 
-| | ไบนารี | แรม |
+| | Binary | RAM |
 |---|---|---|
 | **MarkDB** | **~8.7 MB** | **~25 MB** |
 | pgAdmin | ~250 MB | ~400 MB |
 | DBeaver | ~500 MB | ~700 MB |
 
-## รองรับ
+## Supported databases
 
-| Database | สถานะ |
+| Database | Status |
 |---|---|
-| PostgreSQL 12+ | ครบทุกฟีเจอร์ |
-| Amazon Redshift | เลือกตอนสร้าง connection ตั้งพอร์ตและ SSL ให้เอง (บางฟีเจอร์ยังไม่รองรับ ดูด้านล่าง) |
+| PostgreSQL 12+ | All features |
+| Amazon Redshift | Pick it when creating a connection; port and SSL are set for you (some features are not supported yet, see below) |
 
-## ฟีเจอร์
+## Features
 
-**แก้ข้อมูล**
-- แก้ค่าใน cell ได้เลย: ดับเบิลคลิกแล้วกด `Enter` ระบบอัปเดตผ่าน primary key ใน transaction และเช็คว่าโดนแถวเดียวพอดี
-- แถวว่างท้ายตารางสำหรับเพิ่มข้อมูล: กด `Tab` แล้วระบบเติม uuid, เวลาปัจจุบัน และค่า default ให้
-- วางข้อมูลจาก Excel หรือ Google Sheets ลงช่วง cell ที่เลือก หรือลงแถวใหม่
-- ย้อนการแก้ การเพิ่มแถว และ DELETE ได้จากประวัติการเปลี่ยนแปลง
+**Editing data**
+- Edit a cell in place: double-click, then press `Enter`. The update goes through the primary key inside a transaction that checks exactly one row changed.
+- An empty row at the bottom of each table for new data. Press `Tab` to fill in a uuid, the current time, or the column default.
+- Paste from Excel or Google Sheets into a selected range of cells, or into new rows.
+- Undo edits, inserted rows and `DELETE`s from the change history.
 
-**เขียน SQL**
-- Autocomplete รู้จักชื่อตาราง คอลัมน์ของตารางใน `FROM` และค่าที่มีจริงในคอลัมน์ตอนพิมพ์ `where col = '`
-- ประวัติ SQL ที่รันไปแล้ว ค้นหาได้ (`Ctrl+H`)
-- กรองจาก cell ได้ด้วยการคลิกขวา (เท่ากับ, ไม่เท่ากับ, มีคำนี้, เป็น NULL) และแบ่งหน้า หรือ order by จากหัวคอลัมน์
-- AI ช่วยเขียนและแก้ SQL ที่ error ผ่าน [Claude Code](https://claude.com/claude-code) ที่ login ไว้ในเครื่อง ตัวแอปไม่ต้องเก็บ API key
+**Writing SQL**
+- Autocomplete for table names, the columns of tables in `FROM`, and real values from a column when you type `where col = '`.
+- A searchable history of every query you ran (`Ctrl+H`).
+- Right-click a cell to filter by it (equals, not equals, contains, is NULL). Paginate, or order by from the column header.
+- AI writes SQL and fixes failing queries through [Claude Code](https://claude.com/claude-code) logged in on your machine. The app never stores an API key.
 
-**กันพลาด**
-- ติดป้าย Production หรืออ่านอย่างเดียวให้แต่ละ connection ได้ บน Postgres ใช้ read-only transaction บังคับที่ระดับ session
-- เตือนก่อนรันคำสั่งเขียนบน PROD และ `UPDATE` / `DELETE` ที่ไม่มี `WHERE`
-- ก่อนลบหรือ drop ต้องรอ 3 วินาทีก่อนกดยืนยัน
+**Safety**
+- Mark a connection as Production or read-only. On Postgres, read-only is enforced per session with read-only transactions.
+- A warning before running a write on production, and before an `UPDATE` / `DELETE` without `WHERE`.
+- Delete and drop confirmations make you wait 3 seconds before the button unlocks.
 
-**เครื่องมือ**
-- ER diagram ที่อ่าน foreign key ทั้ง database
-- Backup และ restore ทั้ง database เป็นไฟล์ `.sql` เดียว โดยไม่ต้องมี `pg_dump`
-- Sync ตารางข้าม connection (เช่น dev ไป uat) ทั้งโครงสร้างและข้อมูล
-- Import และ export เป็น CSV, SQL หรือ JSON (CSV เป็น UTF-8 + BOM เปิดใน Excel แล้วอ่านภาษาไทยได้)
+**Tools**
+- An ER diagram built from every foreign key in the database.
+- Back up and restore a whole database as a single `.sql` file, without `pg_dump`.
+- Sync tables across connections (for example dev to uat), both schema and data.
+- Import and export CSV, SQL or JSON. CSV is UTF-8 with a BOM, so Excel opens it with non-Latin text intact.
 
-**ใช้งานทั่วไป**
-- จัดกลุ่ม connection ตาม host ให้อัตโนมัติ ตั้งชื่อกลุ่มเองหรือพับเก็บได้
-- ตารางหลักพันแถวเลื่อนลื่นเพราะ virtualize grid
-- อัปเดตตัวเองเมื่อมีเวอร์ชันใหม่
+**Everyday use**
+- Connections are grouped by host automatically. Rename or collapse groups.
+- A virtualized grid keeps thousands of rows scrolling smoothly.
+- Updates itself when a new version is out.
 
-## ติดตั้ง
+## Install
 
-ดาวน์โหลด `MarkDB_x.y.z_x64-setup.exe` จาก [Releases](https://github.com/thanadon-dev/markdb/releases/latest) แล้วติดตั้ง
+Download `MarkDB_x.y.z_x64-setup.exe` from [Releases](https://github.com/thanadon-dev/markdb/releases/latest) and run it.
 
-> ใช้ได้บน Windows x64 ที่มี WebView2 (Windows 11 และ Windows 10 ที่อัปเดตแล้วมีมาให้)
-> ตัวติดตั้งยังไม่ได้ code sign จึงมี SmartScreen เตือนตอนเปิดครั้งแรก ให้กด More info แล้วกด Run anyway
+> Requires Windows x64 with WebView2 (included in Windows 11 and up-to-date Windows 10).
+> The installer is not code-signed yet, so SmartScreen warns on first run. Click More info, then Run anyway.
 
-## ข้อจำกัดที่ควรรู้
+## Known limitations
 
-- **password ของ connection เก็บใน `localStorage` แบบ plaintext** จึงยังไม่ควรใช้กับเครื่องที่หลายคนใช้ร่วมกัน
-- backup ยังไม่รวม trigger, function, extension, GRANT และ partition
-- Redshift ยัง backup ทั้ง database ไม่ได้ import CSV ใช้ INSERT แทน `COPY` และโหมดอ่านอย่างเดียวบังคับแค่ในแอป
-- รองรับแค่ Windows x64
+- **Connection passwords are stored in `localStorage` as plain text.** Don't use MarkDB on a machine shared with other people yet.
+- Backups don't include triggers, functions, extensions, GRANTs or partitions.
+- Redshift: whole-database backup isn't supported, CSV import uses `INSERT` instead of `COPY`, and read-only mode is enforced only in the app.
+- Windows x64 only.
 
-## พัฒนา
+## Development
 
-ต้องมี [Node.js](https://nodejs.org) 22.18+ (เทสต์รันไฟล์ `.ts` ตรง ๆ), [Rust](https://rustup.rs) stable และ [สิ่งที่ Tauri ต้องใช้บน Windows](https://v2.tauri.app/start/prerequisites/)
+You need [Node.js](https://nodejs.org) 22.18+ (tests run `.ts` files directly), [Rust](https://rustup.rs) stable and the [Tauri prerequisites for Windows](https://v2.tauri.app/start/prerequisites/).
 
 ```bash
 npm install
-npm run tauri dev      # เปิดแอปแบบ dev (hot reload)
-npm run tauri build    # build ตัวติดตั้ง → src-tauri/target/release/bundle/
+npm run tauri dev      # run the app with hot reload
+npm run tauri build    # build the installer → src-tauri/target/release/bundle/
 ```
 
-### เทสต์
+### Tests
 
 ```bash
-npm test                                   # เทสต์ฝั่ง TypeScript (node --test)
-cd src-tauri && cargo test                 # เทสต์ฝั่ง Rust
-# เทสต์ที่ต้องต่อ Postgres จริง (ใช้ DB ทิ้งได้เท่านั้น เพราะเทสต์สร้างและลบตาราง)
+npm test                                   # TypeScript tests (node --test)
+npm run build                              # type-check and build the frontend (cargo needs dist/)
+cd src-tauri && cargo test                 # Rust tests
+# Tests against a real Postgres. Use a throwaway database: they create and drop tables.
 MARKDB_TEST_PG=postgres://user:pass@localhost:5432/db cargo test -- --ignored
 ```
 
-### โครงสร้าง
+### Layout
 
-| ไฟล์ | หน้าที่ |
+| File | Purpose |
 |---|---|
-| `src-tauri/src/lib.rs` | คำสั่งที่คุยกับ DB ทั้งหมด (sqlx) |
-| `src-tauri/src/sync.rs` | sync ตารางข้าม connection |
-| `src-tauri/src/ai.rs` | เรียก `claude` CLI สำหรับ AI |
+| `src-tauri/src/lib.rs` | Every command that talks to the database (sqlx) |
+| `src-tauri/src/sync.rs` | Table sync across connections |
+| `src-tauri/src/ai.rs` | Calls the `claude` CLI for AI features |
 | `src/App.tsx` | UI |
-| `src/*.ts` | logic ล้วนที่เทสต์ได้ เช่น ตัดคำสั่ง SQL (`sqlsplit`), เติม where/order/limit (`sqltail`), กันพลาด (`guard`), ประวัติ (`history`, `queries`) |
-| `src/styles.css` | ธีม |
+| `src/*.ts` | Pure, tested logic: splitting SQL statements (`sqlsplit`), adding where/order/limit (`sqltail`), write guards (`guard`), history (`history`, `queries`) |
+| `src/styles.css` | Theme |
 
-## ร่วมพัฒนา
+## Contributing
 
-ยินดีรับ issue และ pull request
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, code guidelines and how to send a PR.
+Found a security issue? Don't open a public issue; follow [SECURITY.md](SECURITY.md).
 
-- **bug**: เปิด issue บอกเวอร์ชัน, DB (Postgres เวอร์ชันไหน หรือ Redshift), ขั้นตอนที่ทำให้เกิด และสิ่งที่คาดว่าจะเกิด
-- **ฟีเจอร์ใหญ่**: เปิด issue คุยกันก่อนลงมือ จะได้ไม่ทำซ้ำหรือทำไปแล้วไม่ตรงทาง
-- **pull request**: หนึ่ง PR ต่อหนึ่งเรื่อง รัน `npm test` และ `cargo test` ให้ผ่านก่อนส่ง ถ้าแก้ logic ให้เพิ่มเทสต์ด้วย
-- logic ที่ไม่ผูกกับ UI ให้แยกไว้ใน `src/*.ts` แล้วเขียนเทสต์คู่กันเป็น `*.test.ts`
-- ห้ามใส่ password, connection string หรือข้อมูลจริงจาก DB ลงในโค้ด เทสต์ หรือ issue
+Release notes for every version are in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
