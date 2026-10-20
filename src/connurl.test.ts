@@ -16,8 +16,26 @@ test("แตก URL เป็นช่อง: host เดียวกัน ค�
   assert.equal(fromUrl("postgres://h")?.port, "");
 });
 
-test("ไม่ใช่ URL ของ postgres → null", () => {
+test("MySQL / MariaDB / SQLite บอกชนิดมาด้วย, postgres ไม่บอก (อาจเป็น Redshift)", () => {
+  assert.deepEqual(fromUrl("mysql://root:pw@10.0.0.5:3307/shop?ssl-mode=REQUIRED"), {
+    engine: "mysql",
+    host: "10.0.0.5",
+    port: "3307",
+    user: "root",
+    pass: "pw",
+    db: "shop",
+    ssl: true,
+  });
+  assert.equal(fromUrl("mariadb://u@h/db")?.engine, "mysql");
+  assert.equal(fromUrl("postgres://u@h/db")?.engine, undefined);
+  assert.ok(!("engine" in fromUrl("postgres://u@h/db")!));
+  assert.deepEqual(fromUrl("sqlite:C:\\data\\app.db"), { engine: "sqlite", host: "", port: "", user: "", pass: "", db: "C:\\data\\app.db", ssl: false });
+  assert.equal(fromUrl("sqlite:///home/me/a.db")?.db, "/home/me/a.db");
+});
+
+test("ไม่ใช่ URL ที่รู้จัก → null", () => {
   assert.equal(fromUrl("localhost"), null);
-  assert.equal(fromUrl("mysql://u@h/db"), null);
+  assert.equal(fromUrl("oracle://u@h/db"), null);
   assert.equal(fromUrl("postgres://"), null);
+  assert.equal(fromUrl("sqlite:"), null);
 });

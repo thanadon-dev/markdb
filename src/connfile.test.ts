@@ -12,6 +12,11 @@ test("export ไม่มี password / id", () => {
   assert.ok(!text.includes("secret"));
   assert.ok(!text.includes('"id"'));
   assert.equal(out[0].group, "DEV");
+  // SSH: ที่อยู่ไปด้วย แต่ password / passphrase / path ของ key ไม่ไป
+  const withSsh = toFile([{ ...BLANK, id: "b", sshPass: "sshsecret", ssh: { on: true, host: "bastion", port: "22", user: "me", auth: "key" as const, keyPath: "C:/k", fingerprint: "SHA256:x" } }]);
+  const t2 = JSON.stringify(withSsh);
+  assert.ok(!t2.includes("sshsecret") && !t2.includes("C:/k"));
+  assert.equal(withSsh[0].ssh?.host, "bastion");
 });
 
 test("import: ข้ามตัวซ้ำ, ได้ id ใหม่, password ว่าง, ช่องแปลกถูกทิ้ง", () => {
@@ -29,6 +34,8 @@ test("import: ข้ามตัวซ้ำ, ได้ id ใหม่, passwor
   assert.equal(add[0].prod, true);
   assert.ok(add[0].id.startsWith("n"));
   assert.ok(!("evil" in add[0]));
+  const { add: a2 } = fromFile(JSON.stringify([{ host: "h", db: "d", ssh: { on: true, host: "b", user: "me", auth: "weird", password: "leak" } }]), [], BLANK, uid);
+  assert.deepEqual(a2[0].ssh, { on: true, host: "b", port: "22", user: "me", auth: "password", fingerprint: undefined });
 });
 
 test("import: ไฟล์ผิดรูปแบบ → error", () => {

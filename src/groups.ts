@@ -1,8 +1,10 @@
 /* จัดกลุ่ม connection ในแถบซ้าย: ตั้งชื่อกลุ่มเอง (group) > host เดียวกันอยู่กลุ่มเดียวกันอัตโนมัติ */
 
-type C = { host: string; url?: string; group?: string };
+type C = { host: string; url?: string; group?: string; engine?: string };
 
 export const hostOf = (c: C) => {
+  // SQLite เป็นไฟล์ในเครื่อง ไม่มี host — รวมไว้กลุ่มเดียวกัน
+  if (c.engine === "sqlite") return "SQLite";
   if (c.host) return c.host;
   try {
     return new URL(c.url ?? "").hostname || "อื่น ๆ"; // connection แบบเก่าที่เก็บเป็น URL ล้วน

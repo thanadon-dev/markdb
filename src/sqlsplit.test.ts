@@ -70,6 +70,7 @@ test("หาตารางที่เขียนกลับได้จา�
   assert.equal(tt("select * from users"), "users");
   assert.equal(tt("select * from users;"), "users");
   assert.equal(tt('select *\nfrom "public"."users"\nlimit 500;'), "public.users");
+  assert.equal(tt("select *\nfrom `shop`.`orders`\nlimit 15;"), "shop.orders");
   assert.equal(tt("select id, name from sales.orders where id = 3 order by id"), "sales.orders");
   assert.equal(tt("SELECT * FROM Users u WHERE u.id = 1"), "Users");
   assert.equal(tt("select * from users limit 10"), "users");

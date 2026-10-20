@@ -53,6 +53,12 @@ test("กรองจาก cell: เพิ่ม where / and / ห่อ subque
   assert.equal(filterCond("x", "null", null), `"x" is null`);
   assert.equal(filterCond("n", "like", "50%_a"), String.raw`"n"::varchar ilike '%50\%\_a%'`);
   assert.equal(filterCond("n", "like", String.raw`c:\x`), String.raw`"n"::varchar ilike '%c:\\x%'`);
+  // SQLite: ไม่มี :: / ilike ต้องบอก escape เอง
+  assert.equal(filterCond("n", "like", "5%", "sqlite"), String.raw`cast("n" as text) like '%5\%%' escape '` + "\\'");
+  // MySQL: quote ด้วย ` และ \ ใน string ต้องซ้อนอีกชั้น
+  assert.equal(filterCond("n", "eq", String.raw`c:\x`, "mysql"), "`n` = 'c:" + "\\\\" + "x'");
+  assert.equal(filterCond("n", "like", "c:\\x_", "mysql"), "cast(`n` as char) like '%c:" + "\\\\\\\\" + "x" + "\\\\" + "_%'");
+  assert.equal(filterCond("a`b", "null", null, "mysql"), "`a``b` is null");
   assert.equal(
     addWhere('select *\nfrom "public"."t"\nlimit 15 offset 30;', `"id" = 1`),
     'select *\nfrom "public"."t"\nwhere "id" = 1\nlimit 15;',

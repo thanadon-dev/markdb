@@ -22,9 +22,11 @@ serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["sync", "process", "io-util"] }
 csv = "1"
 futures-util = "0.3"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "json"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "sqlite", "mysql", "json"] }
 rust_xlsxwriter = { version = "0.100.0", default-features = false }
-keyring = { version = "3", features = ["windows-native"] }
+keyring = { version = "3", features = ["windows-native", "apple-native", "async-secret-service", "async-io", "crypto-rust"] }
+russh = { version = "0.64", default-features = false, features = ["ring", "rsa", "flate2"] }
+url = "2"
 
 [profile.release]
 opt-level = "s"
@@ -38,4 +40,5 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 
 [dev-dependencies]
+rand = { version = "0.10", features = ["thread_rng"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

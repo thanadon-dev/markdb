@@ -75,7 +75,8 @@ export const stmtAt = (doc: string, pos: number) => {
    แถวที่เห็นมาจากตารางไหน (ฝั่ง server ยังกันซ้ำอีกชั้นด้วยการนับแถวที่โดนก่อน commit) */
 const CLAUSE_RE =
   /\b(where|group|having|order|limit|offset|window|union|except|intersect|fetch|for)\b/i;
-const ONE_TABLE_RE = /^"?([\w$]+)"?(?:\s*\.\s*"?([\w$]+)"?)?(?:\s+(?:as\s+)?[a-z_][\w$]*)?$/i;
+// ชื่อ quote ได้ทั้ง "…" (Postgres/SQLite) และ `…` (MySQL)
+const ONE_TABLE_RE = /^["`]?([\w$]+)["`]?(?:\s*\.\s*["`]?([\w$]+)["`]?)?(?:\s+(?:as\s+)?[a-z_][\w$]*)?$/i;
 
 export const targetTable = (sql: string): { schema?: string; name: string } | null => {
   const clean = sql.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ").trim();

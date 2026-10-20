@@ -9,13 +9,14 @@ test("host เดียวกันรวมกลุ่มเอง, ตั้�
     { id: "c", host: "10.0.0.1" },
     { id: "d", host: "", url: "postgres://u@db.local:5432/x" },
     { id: "e", host: "10.0.0.2", group: "UAT" },
+    { id: "f", host: "", engine: "sqlite" },
   ];
   assert.deepEqual(
     grouped(cs).map((g) => [g.name, g.items.map((c) => c.id)]),
-    [["10.0.0.1", ["a", "c"]], ["10.0.0.2", ["b"]], ["db.local", ["d"]], ["UAT", ["e"]]],
+    [["10.0.0.1", ["a", "c"]], ["10.0.0.2", ["b"]], ["db.local", ["d"]], ["UAT", ["e"]], ["SQLite", ["f"]]],
   );
   const r = renameGroup(cs, "10.0.0.1", " DEV ");
-  assert.deepEqual(grouped(r).map((g) => g.name), ["DEV", "10.0.0.2", "db.local", "UAT"]);
+  assert.deepEqual(grouped(r).map((g) => g.name), ["DEV", "10.0.0.2", "db.local", "UAT", "SQLite"]);
   // ชื่อว่าง = กลับไปจัดตาม host
   assert.deepEqual(grouped(renameGroup(r, "DEV", "")).map((g) => g.name)[0], "10.0.0.1");
 });

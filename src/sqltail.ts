@@ -79,30 +79,39 @@ export const withTail = (sql: string, patch: Partial<Omit<Tail, "head" | "semi">
   return t ? buildTail({ ...t, ...patch }) : null;
 };
 
-export const quoteIdent = (c: string) => `"${c.replace(/"/g, '""')}"`;
+/** ชนิด SQL — MySQL quote ชื่อด้วย ` และถือ \ ใน string เป็น escape, SQLite/MySQL ไม่มี :: กับ ilike */
+export type Dialect = "postgres" | "redshift" | "sqlite" | "mysql";
+
+export const quoteIdent = (c: string, d?: Dialect) =>
+  d === "mysql" ? `\`${c.replace(/`/g, "``")}\`` : `"${c.replace(/"/g, '""')}"`;
 
 export type FilterOp = "eq" | "ne" | "null" | "notnull" | "like";
 
-const lit = (v: unknown) =>
-  typeof v === "number" || typeof v === "boolean"
-    ? String(v)
-    : `'${(typeof v === "string" ? v : JSON.stringify(v)).replace(/'/g, "''")}'`;
+const lit = (v: unknown, d?: Dialect) => {
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  const s = (typeof v === "string" ? v : JSON.stringify(v)).replace(/'/g, "''");
+  return `'${d === "mysql" ? s.replace(/\\/g, "\\\\") : s}'`;
+};
 
 /** เงื่อนไขจากค่าใน cell — like = มีคำนี้อยู่ (ไม่สนตัวเล็กใหญ่) */
-export const filterCond = (col: string, op: FilterOp, v: unknown) => {
-  const c = quoteIdent(col);
+export const filterCond = (col: string, op: FilterOp, v: unknown, d?: Dialect) => {
+  const c = quoteIdent(col, d);
   if (op === "null") return `${c} is null`;
   if (op === "notnull") return `${c} is not null`;
   if (op === "like") {
     const t = (typeof v === "string" ? v : JSON.stringify(v)).replace(/[\\%_]/g, (m) => "\\" + m);
-    return `${c}::varchar ilike ${lit(`%${t}%`)}`;
+    const pat = lit(`%${t}%`, d);
+    // SQLite / MySQL: like ไม่สนตัวเล็กใหญ่อยู่แล้ว (SQLite เฉพาะ A-Z) — SQLite ไม่มี escape ตั้งต้น ต้องบอกเอง
+    if (d === "sqlite") return `cast(${c} as text) like ${pat} escape '\\'`;
+    if (d === "mysql") return `cast(${c} as char) like ${pat}`;
+    return `${c}::varchar ilike ${pat}`;
   }
-  return `${c} ${op === "eq" ? "=" : "<>"} ${lit(v)}`;
+  return `${c} ${op === "eq" ? "=" : "<>"} ${lit(v, d)}`;
 };
 
 const CLAUSE = /^(where|group\s+by|having|window|union|except|intersect)\b/i;
 // select list ที่เป็นแค่ * หรือชื่อคอลัมน์ล้วน — ชื่อบนจอตรงกับชื่อจริง ใส่ where ตรง ๆ ได้
-const PLAIN = /^select\s+(distinct\s+)?(("[^"]*"|[\w.*]+)\s*,\s*)*("[^"]*"|[\w.*]+)\s+from\s/i;
+const PLAIN = /^select\s+(distinct\s+)?(("[^"]*"|`[^`]*`|[\w.*]+)\s*,\s*)*("[^"]*"|`[^`]*`|[\w.*]+)\s+from\s/i;
 
 /** เพิ่มเงื่อนไขเข้า where ของ SELECT แล้วรีเซ็ต offset — null ถ้าส่วนท้ายอ่านไม่ออก
     query ที่มี group by / union / alias → ห่อเป็น subquery แทน (ชื่อคอลัมน์บนจอยังใช้ได้) */
