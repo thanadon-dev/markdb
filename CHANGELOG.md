@@ -2,6 +2,23 @@
 
 All notable changes to MarkDB. Release notes are written in Thai.
 
+## [v0.3.1](https://github.com/thanadon-dev/markdb/releases/tag/v0.3.1) — 2026-10-20
+
+### ใหม่
+
+- **รองรับ SQLite และ MySQL / MariaDB** — เลือกได้ในฟอร์ม connection (SQLite เลือกไฟล์ .db) ดูตาราง รัน query แก้ข้อมูล ER diagram ได้ ยังไม่มี backup / import CSV / sync
+- **SSH tunnel** — ต่อ database ที่อยู่หลัง bastion / jump host ด้วย password หรือ private key จำ host key ตั้งแต่ต่อครั้งแรก
+- **Query plan** (ปุ่ม Explain / Ctrl+E) — แผนการรันแบบต้นไม้ กด Explain Analyze ดูเวลาจริง (รันแล้ว rollback เสมอ) ไฮไลต์ขั้นที่ช้าและเตือนจุดที่อาจต้องมี index
+- **Session / lock** (เมนูเครื่องมือ → Sessions) — ใครต่ออยู่ ใครรอ lock ใครถือ lock ยกเลิก query หรือตัด session ได้
+- **กราฟจากผลลัพธ์** — ปุ่ม Chart ข้าง Grid / Record ได้กราฟแท่งหรือเส้น
+- **จัดรูป SQL** — Shift+Alt+F หรือปุ่มข้าง Run
+- **รันหลายคำสั่งพร้อมกัน** — ลากคลุมหลายคำสั่งแล้วรัน สลับดูผลทีละคำสั่งได้
+
+### แก้ไข
+
+- ลากคลุม select หลายคำสั่งแล้วรันจะ error
+- หน้าต่างที่สูงเกินจอ ปุ่มด้านล่างหลุดออกนอกจอกดไม่ได้ — ตอนนี้เลื่อนในหน้าต่างได้
+
 ## [v0.3.0](https://github.com/thanadon-dev/markdb/releases/tag/v0.3.0) — 2026-10-20
 
 ### ใหม่
