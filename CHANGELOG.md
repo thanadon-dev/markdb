@@ -2,6 +2,20 @@
 
 All notable changes to MarkDB. Release notes are written in Thai.
 
+## [v0.3.0](https://github.com/thanadon-dev/markdb/releases/tag/v0.3.0) — 2026-10-20
+
+### ใหม่
+
+- **password เก็บใน Windows Credential Manager** — ไม่เก็บในเครื่องแบบอ่านออกได้อีกแล้ว connection เดิมย้ายให้เองตอนเปิดแอป ไม่ต้องกรอกใหม่
+- **Export / Import connection** (เมนูเครื่องมือ) — ส่งรายการ connection ให้คนในทีมเป็นไฟล์ .json ไม่มี password ติดไป ตอน import ข้ามตัวที่มีอยู่แล้ว
+- **Export เป็น Excel (.xlsx)** — ตัวเลขเป็นตัวเลขจริง คำนวณต่อใน Excel ได้ หัวตารางตรึงไว้
+- **Query ที่บันทึกไว้** — กดดาวข้างปุ่ม Run หรือ Ctrl+S เพื่อเก็บ query ไว้ใช้ซ้ำ หรือกดดาวจากประวัติ SQL (Ctrl+H → แท็บ "บันทึกไว้") แก้ชื่อได้
+- **ธีมสว่าง** — ปุ่มข้างเลขเวอร์ชัน สลับ มืด → สว่าง → ตามระบบ (ค่าเริ่มต้นยังเป็นมืด)
+
+### ดีขึ้น
+
+- database ที่ user อ่านได้ไม่ครบทุก schema ยังเห็นรายการตาราง — รายชื่อตารางกับคอลัมน์โหลดแยกกัน อันไหนพังอีกอันยังขึ้น
+
 ## [v0.2.2](https://github.com/thanadon-dev/markdb/releases/tag/v0.2.2) — 2026-10-20
 
 ### แก้ไข

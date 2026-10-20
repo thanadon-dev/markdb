@@ -45,7 +45,7 @@ The installer is under 5 MB. It starts fast and uses little memory, because it r
 
 **Writing SQL**
 - Autocomplete for table names, the columns of tables in `FROM`, and real values from a column when you type `where col = '`.
-- A searchable history of every query you ran (`Ctrl+H`).
+- A searchable history of every query you ran (`Ctrl+H`). Star a query (or press `Ctrl+S` in the editor) to keep it with a name.
 - Right-click a cell to filter by it (equals, not equals, contains, is NULL). Paginate, or order by from the column header.
 - AI writes SQL and fixes failing queries through [Claude Code](https://claude.com/claude-code) or [Codex CLI](https://github.com/openai/codex) logged in on your machine. Pick any Claude model (Haiku by default) or a Codex model. The app never stores an API key.
 
@@ -58,10 +58,12 @@ The installer is under 5 MB. It starts fast and uses little memory, because it r
 - An ER diagram built from every foreign key in the database.
 - Back up and restore a whole database as a single `.sql` file, without `pg_dump`.
 - Sync tables across connections (for example dev to uat), both schema and data.
-- Import and export CSV, SQL or JSON. CSV is UTF-8 with a BOM, so Excel opens it with non-Latin text intact.
+- Export results to Excel (`.xlsx`, numbers stay numbers), CSV, SQL or JSON. Import CSV or SQL. CSV is UTF-8 with a BOM, so Excel opens it with non-Latin text intact.
 
 **Everyday use**
-- Connections are grouped by host automatically. Rename or collapse groups.
+- Connection passwords are kept in Windows Credential Manager, not in the app's storage.
+- Connections are grouped by host automatically. Rename or collapse groups. Share the connection list with your team as a file (passwords are never included).
+- Dark and light themes, or follow the Windows setting.
 - A virtualized grid keeps thousands of rows scrolling smoothly.
 - Updates itself when a new version is out.
 
@@ -74,7 +76,6 @@ Download `MarkDB_x.y.z_x64-setup.exe` from [Releases](https://github.com/thanado
 
 ## Known limitations
 
-- **Connection passwords are stored in `localStorage` as plain text.** Don't use MarkDB on a machine shared with other people yet.
 - Backups don't include triggers, functions, extensions, GRANTs or partitions.
 - Redshift: whole-database backup isn't supported, CSV import uses `INSERT` instead of `COPY`, and read-only mode is enforced only in the app.
 - Windows x64 only.

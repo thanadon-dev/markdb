@@ -44,7 +44,7 @@
 
 **เขียน SQL**
 - Autocomplete รู้จักชื่อตาราง คอลัมน์ของตารางใน `FROM` และค่าที่มีจริงในคอลัมน์ตอนพิมพ์ `where col = '`
-- ประวัติ SQL ที่รันไปแล้ว ค้นหาได้ (`Ctrl+H`)
+- ประวัติ SQL ที่รันไปแล้ว ค้นหาได้ (`Ctrl+H`) กดดาว (หรือ `Ctrl+S` ใน editor) เพื่อเก็บ query ที่ใช้บ่อยไว้พร้อมตั้งชื่อ
 - กรองจาก cell ได้ด้วยการคลิกขวา (เท่ากับ, ไม่เท่ากับ, มีคำนี้, เป็น NULL) และแบ่งหน้า หรือ order by จากหัวคอลัมน์
 - AI ช่วยเขียนและแก้ SQL ที่ error ผ่าน [Claude Code](https://claude.com/claude-code) หรือ [Codex CLI](https://github.com/openai/codex) ที่ login ไว้ในเครื่อง เลือก model ของ Claude ได้ทุกรุ่น (ค่าเริ่มต้นคือ Haiku) หรือ model ของ Codex ตัวแอปไม่ต้องเก็บ API key
 
@@ -57,10 +57,12 @@
 - ER diagram ที่อ่าน foreign key ทั้ง database
 - Backup และ restore ทั้ง database เป็นไฟล์ `.sql` เดียว โดยไม่ต้องมี `pg_dump`
 - Sync ตารางข้าม connection (เช่น dev ไป uat) ทั้งโครงสร้างและข้อมูล
-- Import และ export เป็น CSV, SQL หรือ JSON (CSV เป็น UTF-8 + BOM เปิดใน Excel แล้วอ่านภาษาไทยได้)
+- Export ผลลัพธ์เป็น Excel (`.xlsx` ตัวเลขยังเป็นตัวเลข), CSV, SQL หรือ JSON และ import CSV หรือ SQL (CSV เป็น UTF-8 + BOM เปิดใน Excel แล้วอ่านภาษาไทยได้)
 
 **ใช้งานทั่วไป**
-- จัดกลุ่ม connection ตาม host ให้อัตโนมัติ ตั้งชื่อกลุ่มเองหรือพับเก็บได้
+- password ของ connection เก็บใน Windows Credential Manager ไม่ได้เก็บในที่เก็บข้อมูลของแอป
+- จัดกลุ่ม connection ตาม host ให้อัตโนมัติ ตั้งชื่อกลุ่มเองหรือพับเก็บได้ ส่งรายการ connection ให้คนในทีมเป็นไฟล์ได้ (ไม่มี password ติดไปด้วย)
+- ธีมมืดและสว่าง หรือให้เปลี่ยนตาม Windows
 - ตารางหลักพันแถวเลื่อนลื่นเพราะ virtualize grid
 - อัปเดตตัวเองเมื่อมีเวอร์ชันใหม่
 
@@ -73,7 +75,6 @@
 
 ## ข้อจำกัดที่ควรรู้
 
-- **password ของ connection เก็บใน `localStorage` แบบ plaintext** จึงยังไม่ควรใช้กับเครื่องที่หลายคนใช้ร่วมกัน
 - backup ยังไม่รวม trigger, function, extension, GRANT และ partition
 - Redshift ยัง backup ทั้ง database ไม่ได้ import CSV ใช้ INSERT แทน `COPY` และโหมดอ่านอย่างเดียวบังคับแค่ในแอป
 - รองรับแค่ Windows x64

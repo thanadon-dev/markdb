@@ -1089,6 +1089,87 @@ fn export_json(path: String, rows: Vec<serde_json::Value>) -> R<usize> {
     Ok(rows.len())
 }
 
+/// ค่าหนึ่ง cell ลง Excel: ตัวเลข/boolean เป็นชนิดจริง (Excel คำนวณต่อได้) ที่เหลือเป็นข้อความ
+/// เลขเต็มที่เกิน 2^53 เก็บเป็นข้อความ — f64 ของ Excel เก็บได้ไม่ครบหลัก (id แบบ bigint จะเพี้ยน)
+fn xlsx_cell(ws: &mut rust_xlsxwriter::Worksheet, r: u32, c: u16, v: &serde_json::Value) -> R<()> {
+    use serde_json::Value;
+    const SAFE: f64 = 9_007_199_254_740_991.0;
+    match v {
+        Value::Null => {}
+        Value::Bool(b) => {
+            ws.write_boolean(r, c, *b).map_err(err)?;
+        }
+        Value::Number(n) => match n.as_f64() {
+            Some(f) if f.is_finite() && (n.is_f64() || f.abs() <= SAFE) => {
+                ws.write_number(r, c, f).map_err(err)?;
+            }
+            _ => {
+                ws.write_string(r, c, n.to_string()).map_err(err)?;
+            }
+        },
+        other => {
+            // Excel รับข้อความยาวสุด 32,767 ตัวอักษรต่อ cell — ยาวกว่านั้นตัดทิ้ง ไม่งั้นทั้งไฟล์ export ไม่ได้
+            let t: String = cell_text(other).chars().take(32_767).collect();
+            ws.write_string(r, c, t).map_err(err)?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn export_xlsx(path: String, columns: Vec<String>, rows: Vec<serde_json::Value>) -> R<usize> {
+    let mut wb = rust_xlsxwriter::Workbook::new();
+    let ws = wb.add_worksheet();
+    let bold = rust_xlsxwriter::Format::new().set_bold();
+    for (c, name) in columns.iter().enumerate() {
+        ws.write_string_with_format(0, c as u16, name, &bold).map_err(err)?;
+    }
+    for (r, row) in rows.iter().enumerate() {
+        for (c, name) in columns.iter().enumerate() {
+            xlsx_cell(ws, r as u32 + 1, c as u16, row.get(name).unwrap_or(&serde_json::Value::Null))?;
+        }
+    }
+    ws.set_freeze_panes(1, 0).map_err(err)?;
+    ws.autofit();
+    wb.save(&path).map_err(err)?;
+    Ok(rows.len())
+}
+
+/// อ่านไฟล์ข้อความทั้งไฟล์ — ใช้ตอน import รายการ connection
+#[tauri::command]
+fn read_text(path: String) -> R<String> {
+    std::fs::read_to_string(&path).map_err(err)
+}
+
+/// password ของ connection เก็บใน Windows Credential Manager (ผูกกับ Windows user ของเครื่องนี้)
+/// ไม่เก็บใน localStorage ที่ใครเปิดไฟล์ profile ของ WebView ก็อ่านได้
+fn secret(id: &str) -> R<keyring::Entry> {
+    keyring::Entry::new("markdb", id).map_err(err)
+}
+
+#[tauri::command]
+fn secret_get(id: String) -> R<Option<String>> {
+    match secret(&id)?.get_password() {
+        Ok(p) => Ok(Some(p)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(err(e)),
+    }
+}
+
+/// pass ว่าง = ลบทิ้ง (connection ที่ไม่มี password หรือถูกลบไปแล้ว)
+#[tauri::command]
+fn secret_set(id: String, pass: String) -> R<()> {
+    let e = secret(&id)?;
+    if pass.is_empty() {
+        match e.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(x) => Err(err(x)),
+        }
+    } else {
+        e.set_password(&pass).map_err(err)
+    }
+}
+
 fn sql_literal(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::Null => "NULL".into(),
@@ -1618,6 +1699,10 @@ pub fn run() {
             conns: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
+            export_xlsx,
+            read_text,
+            secret_get,
+            secret_set,
             connect,
             test_connection,
             disconnect,
@@ -1814,6 +1899,29 @@ mod tests {
         for db in ["markdb_two_a", "markdb_two_b"] {
             admin.execute(format!("drop database {db} with (force)").as_str()).await.unwrap();
         }
+    }
+
+    #[test]
+    fn xlsx_keeps_types() {
+        let path = std::env::temp_dir().join("markdb_test.xlsx");
+        let rows = vec![serde_json::json!({"id": 9007199254740993u64, "n": 1.5, "ok": true, "name": "ไทย", "x": null})];
+        let cols = ["id", "n", "ok", "name", "x"].map(String::from).to_vec();
+        assert_eq!(export_xlsx(path.to_string_lossy().into(), cols, rows).unwrap(), 1);
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[..2], b"PK"); // xlsx = zip
+        std::fs::remove_file(path).ok();
+    }
+
+    /// เขียน-อ่าน-ลบ ใน Credential Manager จริง (ignored: แตะ credential store ของเครื่อง)
+    #[test]
+    #[ignore]
+    fn secret_roundtrip() {
+        let id = "markdb-test-secret".to_string();
+        secret_set(id.clone(), "p@ss ไทย".into()).unwrap();
+        assert_eq!(secret_get(id.clone()).unwrap().as_deref(), Some("p@ss ไทย"));
+        secret_set(id.clone(), "".into()).unwrap();
+        assert_eq!(secret_get(id.clone()).unwrap(), None);
+        secret_set(id, "".into()).unwrap(); // ลบซ้ำไม่ error
     }
 
     #[test]

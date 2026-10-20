@@ -13,6 +13,7 @@ import { risk } from "./guard";
 import * as qh from "./queries";
 import { grouped, renameGroup } from "./groups";
 import { fromUrl } from "./connurl";
+import { fromFile, toFile } from "./connfile";
 import * as hist from "./history";
 import { PostgreSQL, sql as sqlLang } from "@codemirror/lang-sql";
 import { createTheme } from "@uiw/codemirror-themes";
@@ -74,6 +75,13 @@ import {
   RowsPlusBottom,
   Spinner,
   Table as TableIcon,
+  Star,
+  Sun,
+  Moon,
+  Monitor,
+  FileXls,
+  Export as ExportIcon,
+  AddressBook,
   Trash,
   TreeStructure,
   UploadSimple,
@@ -499,31 +507,49 @@ const KIND: Record<hist.Entry["kind"], string> = {
 const when = (t: number) =>
   new Date(t).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "medium" });
 
-const blackTheme = createTheme({
-  theme: "dark",
-  settings: {
-    background: "#000000",
-    foreground: "#ffffff",
-    caret: "#ffffff",
-    selection: "#2f5d9e",
-    selectionMatch: "#1d3a63",
-    lineHighlight: "#0b0b0b",
-    gutterBackground: "#000000",
-    gutterForeground: "#4a4a4a",
-    gutterBorder: "transparent",
-  },
-  styles: [
-    // keyword ใหญ่กว่าตัวอื่น 3px + ตัวหนา — กวาดตาหา SELECT/FROM/WHERE ได้ทันที
-    { tag: t.keyword, color: "#7dd3fc", fontWeight: "700", fontSize: "16px" },
-    { tag: [t.string, t.special(t.string)], color: "#a3e635" },
-    { tag: t.comment, color: "#5a5a5a", fontStyle: "italic" },
-    { tag: [t.number, t.bool, t.null], color: "#fbbf24" },
-    { tag: [t.typeName, t.standard(t.name)], color: "#c084fc" },
-    { tag: [t.propertyName, t.name], color: "#f0f0f0" },
-    { tag: t.operator, color: "#94a3b8" },
-    { tag: t.punctuation, color: "#7a7a7a" },
-  ],
-});
+const editorTheme = (light: boolean) => {
+  const c = light
+    ? { bg: "#ffffff", fg: "#141414", sel: "#b4d2ff", match: "#dbe8ff", line: "#f6f6f6", gutter: "#a0a0a0",
+        kw: "#0369a1", str: "#4d7c0f", cmt: "#8a8a8a", num: "#b45309", type: "#7e22ce", name: "#1f1f1f", op: "#475569", punct: "#6b6b6b" }
+    : { bg: "#000000", fg: "#ffffff", sel: "#2f5d9e", match: "#1d3a63", line: "#0b0b0b", gutter: "#4a4a4a",
+        kw: "#7dd3fc", str: "#a3e635", cmt: "#5a5a5a", num: "#fbbf24", type: "#c084fc", name: "#f0f0f0", op: "#94a3b8", punct: "#7a7a7a" };
+  return createTheme({
+    theme: light ? "light" : "dark",
+    settings: {
+      background: c.bg,
+      foreground: c.fg,
+      caret: c.fg,
+      selection: c.sel,
+      selectionMatch: c.match,
+      lineHighlight: c.line,
+      gutterBackground: c.bg,
+      gutterForeground: c.gutter,
+      gutterBorder: "transparent",
+    },
+    styles: [
+      // keyword ใหญ่กว่าตัวอื่น 3px + ตัวหนา — กวาดตาหา SELECT/FROM/WHERE ได้ทันที
+      { tag: t.keyword, color: c.kw, fontWeight: "700", fontSize: "16px" },
+      { tag: [t.string, t.special(t.string)], color: c.str },
+      { tag: t.comment, color: c.cmt, fontStyle: "italic" },
+      { tag: [t.number, t.bool, t.null], color: c.num },
+      { tag: [t.typeName, t.standard(t.name)], color: c.type },
+      { tag: [t.propertyName, t.name], color: c.name },
+      { tag: t.operator, color: c.op },
+      { tag: t.punctuation, color: c.punct },
+    ],
+  });
+};
+const EDITOR_THEMES = { dark: editorTheme(false), light: editorTheme(true) };
+
+/* ธีม: ค่าเริ่มต้นมืดเหมือนเดิม (คนที่อัปเดตมาไม่เจอแอปเปลี่ยนสีเอง)
+   system = ตาม Windows (ไม่ใส่ data-theme ให้ CSS ใช้ prefers-color-scheme เอง) */
+type Theme = "system" | "dark" | "light";
+const THEME_KEY = "markdb.theme";
+const THEMES: { id: Theme; name: string }[] = [
+  { id: "dark", name: "มืด" },
+  { id: "light", name: "สว่าง" },
+  { id: "system", name: "ตามระบบ" },
+];
 
 /* ---------- ER diagram ---------- */
 
@@ -1155,7 +1181,7 @@ function ErDiagram({ edges, onOpen }: { edges: Edge[]; onOpen: (t: string) => vo
       <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="xMidYMid meet">
         <defs>
           <marker id="tip" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
-            <path d="M0,0 L8,4 L0,8 z" fill="#5a5a5a" />
+            <path d="M0,0 L8,4 L0,8 z" style={{ fill: "var(--dim)" }} />
           </marker>
         </defs>
         <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
@@ -2131,6 +2157,31 @@ Tab = เติมค่าที่แนะนำ · Enter = บันทึ�
 export default function App() {
   const [conns, setConns] = useState<Conn[]>(loadConns);
   const [activeConn, setActiveConn] = useState<string>("");
+  const [theme, setTheme] = useState<Theme>(() => {
+    try {
+      const v = localStorage.getItem(THEME_KEY);
+      return v === "light" || v === "system" ? v : "dark";
+    } catch {
+      return "dark";
+    }
+  });
+  const [sysLight, setSysLight] = useState(() => matchMedia("(prefers-color-scheme: light)").matches);
+  useEffect(() => {
+    const m = matchMedia("(prefers-color-scheme: light)");
+    const on = () => setSysLight(m.matches);
+    m.addEventListener("change", on);
+    return () => m.removeEventListener("change", on);
+  }, []);
+  useEffect(() => {
+    if (theme === "system") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", theme);
+    try {
+      localStorage.setItem(THEME_KEY, theme);
+    } catch {
+      /* จำไม่ได้ก็ใช้ค่านี้ไปก่อน */
+    }
+  }, [theme]);
+  const isLight = theme === "light" || (theme === "system" && sysLight);
   const [live, setLive] = useState<Record<string, Meta>>({});
   const [connErr, setConnErr] = useState<Record<string, string>>({});
   const [filter, setFilter] = useState("");
@@ -2304,7 +2355,44 @@ export default function App() {
   useEffect(() => {
     getVersion().then(setVersion).catch(() => {});
   }, []);
-  useEffect(() => localStorage.setItem(CONNS_KEY, JSON.stringify(conns)), [conns]);
+  /* password อยู่ใน Windows Credential Manager — vault = ค่าที่เก็บลงไปแล้ว (null = ยังอ่านตอนเปิดแอปไม่เสร็จ)
+     localStorage เก็บ password เฉพาะตัวที่ยังย้ายไม่สำเร็จ ย้ายไม่ได้ก็ยังอยู่ที่เดิม ไม่หาย */
+  const vault = useRef<Record<string, string> | null>(null);
+  const connsRef = useRef(conns);
+  connsRef.current = conns;
+  const writeConns = useCallback(() => {
+    const v = vault.current;
+    localStorage.setItem(CONNS_KEY, JSON.stringify(connsRef.current.map((c) => (v?.[c.id] === c.pass ? { ...c, pass: "" } : c))));
+  }, []);
+  useEffect(() => {
+    (async () => {
+      const got: Record<string, string> = {};
+      await Promise.all(
+        connsRef.current
+          .filter((c) => !c.pass)
+          .map(async (c) => {
+            const p = await invoke<string | null>("secret_get", { id: c.id }).catch(() => null);
+            got[c.id] = p ?? "";
+          }),
+      );
+      vault.current = got;
+      setConns((cs) => cs.map((c) => (!c.pass && got[c.id] ? { ...c, pass: got[c.id] } : c)));
+    })();
+  }, []);
+  useEffect(() => {
+    writeConns();
+    const v = vault.current;
+    if (!v) return;
+    const changed = conns.filter((c) => v[c.id] !== c.pass);
+    const gone = Object.keys(v).filter((id) => !conns.some((c) => c.id === id));
+    if (!changed.length && !gone.length) return;
+    Promise.all([
+      ...changed.map((c) => invoke("secret_set", { id: c.id, pass: c.pass }).then(() => void (v[c.id] = c.pass))),
+      ...gone.map((id) => invoke("secret_set", { id, pass: "" }).then(() => void delete v[id])),
+    ])
+      .catch((e) => setToast(`เก็บ password ใน Credential Manager ไม่ได้ — ยังเก็บไว้ในเครื่องแบบเดิม: ${e}`))
+      .finally(writeConns);
+  }, [conns, writeConns]);
 
   useEffect(() => {
     const slim = tabs.map((t) => ({
@@ -2352,6 +2440,9 @@ export default function App() {
 
   useEffect(() => hist.save(log), [log]);
   useEffect(() => qh.save(ranLog), [ranLog]);
+  const [saved, setSaved] = useState<qh.Saved[]>(() => qh.load<qh.Saved>(qh.SAVED_KEY));
+  useEffect(() => qh.save(saved, qh.SAVED_KEY), [saved]);
+  const [qTab, setQTab] = useState<"ran" | "saved">("ran");
 
   const patch = useCallback(
     (id: string, p: Partial<Tab>) =>
@@ -2360,16 +2451,21 @@ export default function App() {
   );
 
   const loadMeta = useCallback(async (id: string) => {
-    const [tbls, cols] = await Promise.all([
+    // โหลดแยกกัน — อันไหนพัง (สิทธิ์ไม่พอ / external schema) อีกอันยังขึ้น แล้วค่อยแจ้ง error
+    const [t, c] = await Promise.allSettled([
       invoke<TableInfo[]>("list_tables", { conn: id }),
       invoke<[string, string, string, string][]>("list_all_columns", { conn: id }),
     ]);
+    const tbls = t.status === "fulfilled" ? t.value : [];
+    const cols = c.status === "fulfilled" ? c.value : [];
     const map: Record<string, string[]> = {};
     for (const [s, t, c] of cols) {
       (map[`${s}.${t}`] ??= []).push(c);
       (map[t] ??= []).push(c);
     }
     setLive((l) => ({ ...l, [id]: { tables: tbls, schema: map, cols } }));
+    const bad = [t, c].find((x): x is PromiseRejectedResult => x.status === "rejected");
+    if (bad) throw bad.reason;
   }, []);
 
   const refresh = useCallback(async () => {
@@ -2393,9 +2489,9 @@ export default function App() {
         try {
           await loadMeta(c.id);
         } catch (e) {
-          // ต่อติดแล้วแต่อ่านรายการตารางไม่ได้ (สิทธิ์ / external schema) — ยังรัน query ได้ อย่านับว่าไม่ได้เชื่อมต่อ
-          setLive((l) => ({ ...l, [c.id]: { tables: [], schema: {}, cols: [] } }));
-          fail(`เชื่อมต่อได้ แต่โหลดรายการตารางไม่ได้: ${e}`);
+          // ต่อติดแล้วแต่อ่านรายการตาราง/คอลัมน์ได้ไม่ครบ — ยังรัน query ได้ อย่านับว่าไม่ได้เชื่อมต่อ
+          setLive((l) => (l[c.id] ? l : { ...l, [c.id]: { tables: [], schema: {}, cols: [] } }));
+          fail(`เชื่อมต่อได้ แต่โหลดรายการตารางได้ไม่ครบ: ${e}`);
         }
         // เลือกผิดก็ยังใช้ได้ — จำค่าที่ตรวจได้จริงไว้แทน
         if (info.engine !== c.engine) {
@@ -2797,8 +2893,32 @@ export default function App() {
     setActiveTab(nt.id);
   }, [activeConn]);
 
+  /* แชร์รายการ connection ให้คนในทีม — ไฟล์ไม่มี password, คนรับใส่เอง */
+  const exportConns = useCallback(async () => {
+    const path = await save({ defaultPath: "markdb-connections.json", filters: [{ name: "JSON", extensions: ["json"] }] });
+    if (!path) return;
+    try {
+      await invoke("export_json", { path, rows: toFile(conns) });
+      say(`export ${conns.length} connection (ไม่มี password) → ${path}`);
+    } catch (e) {
+      say(String(e));
+    }
+  }, [conns, say]);
+
+  const importConns = useCallback(async () => {
+    const path = await open({ filters: [{ name: "JSON", extensions: ["json"] }] });
+    if (typeof path !== "string") return;
+    try {
+      const { add, skipped } = fromFile(await invoke<string>("read_text", { path }), conns, BLANK, uid);
+      setConns((cs) => [...cs, ...add]);
+      say(`เพิ่ม ${add.length} connection${skipped ? ` · ข้ามที่มีอยู่แล้ว ${skipped}` : ""} — ใส่ password ก่อนเชื่อมต่อ`);
+    } catch (e) {
+      say(String(e));
+    }
+  }, [conns, say]);
+
   const exportAs = useCallback(
-    async (kind: "csv" | "sql" | "json", only?: Record<string, unknown>[]) => {
+    async (kind: "csv" | "sql" | "json" | "xlsx", only?: Record<string, unknown>[]) => {
       const rows = only ?? tab?.res?.rows;
       if (!tab?.res || !rows?.length) return say("ไม่มีผลลัพธ์ให้ export");
       const path = await save({
@@ -3110,6 +3230,7 @@ export default function App() {
       // Ctrl+S ถูกจัดการที่ input ของ cell แล้ว — กันไม่ให้ webview เด้ง save page
       if (e.key.toLowerCase() === "s") {
         e.preventDefault();
+        starRef.current();
       } else if (e.key === "Enter") {
         e.preventDefault();
         runNow();
@@ -3129,6 +3250,7 @@ export default function App() {
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
   }, [runNow, addTab]);
+  const starRef = useRef(() => {});
 
   const startDrag = (e: React.MouseEvent) => {
     const y0 = e.clientY;
@@ -3223,6 +3345,18 @@ export default function App() {
   const filterBy = (col: string, op: FilterOp, v: unknown) =>
     tab?.ran && rerunSql(addWhere(tab.ran, filterCond(col, op, v)));
 
+  /* ดาวจาก editor — เก็บทั้ง editor ของแท็บนี้ (Ctrl+S) */
+  const starNow = () => {
+    const sql = tab?.sql.trim();
+    if (!tab || !sql) return say("editor ว่าง — ไม่มีอะไรให้บันทึก");
+    const conn = tab.conn || activeConn;
+    if (qh.isSaved(saved, { conn, sql })) return say("query นี้บันทึกไว้แล้ว — ดูได้ที่ SQL ที่รัน → บันทึกไว้");
+    setSaved((sv) => qh.toggleSaved(sv, { id: uid(), at: Date.now(), conn, connName: conns.find((c) => c.id === conn)?.name ?? "", sql }));
+    say("บันทึก query แล้ว (Ctrl+H → บันทึกไว้)");
+  };
+  starRef.current = starNow;
+  const tabSaved = !!tab?.sql.trim() && qh.isSaved(saved, { conn: tab.conn || activeConn, sql: tab.sql.trim() });
+
   const openRan = (r: qh.Ran, fresh: boolean) => {
     setQOpen(false);
     if (fresh || !tab) {
@@ -3258,6 +3392,8 @@ export default function App() {
           : setSyncOpen(true),
       off: !connected,
     },
+    { label: "Export connections", hint: "รายการ connection เป็นไฟล์ .json (ไม่มี password)", icon: ExportIcon, run: exportConns, off: !conns.length },
+    { label: "Import connections", hint: "เพิ่ม connection จากไฟล์ที่คนอื่นส่งมา", icon: AddressBook, run: importConns, off: false },
   ];
 
   return (
@@ -3269,6 +3405,13 @@ export default function App() {
           <button className="verbtn" title="ประวัติเวอร์ชัน / ตรวจหาอัปเดต" onClick={openUpdates}>
             v{version}
             {update && <span className="newbadge">new update</span>}
+          </button>
+          <button
+            className="themebtn"
+            title={`ธีม: ${THEMES.find((x) => x.id === theme)!.name} — คลิกเพื่อเปลี่ยน`}
+            onClick={() => setTheme((x) => THEMES[(THEMES.findIndex((y) => y.id === x) + 1) % THEMES.length].id)}
+          >
+            {theme === "system" ? <Monitor size={14} /> : theme === "dark" ? <Moon size={14} /> : <Sun size={14} />}
           </button>
         </div>
 
@@ -3550,6 +3693,14 @@ export default function App() {
             <span style={{ opacity: 0.55 }}>Ctrl+↵</span>
           </button>
           <button
+            className={"btn sm starbtn" + (tabSaved ? " on" : "")}
+            onClick={starNow}
+            disabled={!tab?.sql.trim()}
+            title={tabSaved ? "บันทึกไว้แล้ว — ดูได้ที่ Ctrl+H → บันทึกไว้" : "บันทึก query นี้ไว้ใช้ซ้ำ (Ctrl+S)"}
+          >
+            <Star size={14} weight={tabSaved ? "fill" : "duotone"} />
+          </button>
+          <button
             className={"btn sm" + (aiOpen ? " on" : "")}
             onClick={() => setAiOpen((o) => !o)}
             title="ให้ AI เขียน SQL จากคำอธิบาย (ใช้ Claude Code หรือ Codex CLI ที่ login ไว้ในเครื่อง)"
@@ -3691,7 +3842,7 @@ export default function App() {
             ref={cmRef}
             value={tab?.sql ?? ""}
             height={`${editorH}px`}
-            theme={blackTheme}
+            theme={EDITOR_THEMES[isLight ? "light" : "dark"]}
             extensions={cmExt}
             onChange={(v) => tab && patch(tab.id, { sql: v })}
             onUpdate={(u) => {
@@ -4261,7 +4412,19 @@ export default function App() {
             <h3>
               <TerminalWindow size={17} weight="duotone" /> SQL ที่รัน
             </h3>
-            <p>เก็บในเครื่องนี้ {ranLog.length.toLocaleString()} รายการ (ล่าสุด 500) · ดับเบิลคลิก = เปิดในแท็บใหม่</p>
+            <div className="qtabs">
+              <button className={qTab === "ran" ? "on" : ""} onClick={() => setQTab("ran")}>
+                ประวัติ <em>{ranLog.length.toLocaleString()}</em>
+              </button>
+              <button className={qTab === "saved" ? "on" : ""} onClick={() => setQTab("saved")}>
+                <Star size={12} weight="fill" /> บันทึกไว้ <em>{saved.length.toLocaleString()}</em>
+              </button>
+            </div>
+            <p>
+              {qTab === "ran"
+                ? "เก็บในเครื่องนี้ (ล่าสุด 500) · กดดาวเพื่อเก็บไว้ถาวร · ดับเบิลคลิก = เปิดในแท็บใหม่"
+                : "query ที่กดดาวไว้ ไม่ถูกลบตามประวัติ · แก้ชื่อได้ · ดับเบิลคลิก = เปิดในแท็บใหม่"}
+            </p>
             <div className="qsearch">
               <MagnifyingGlass size={14} />
               <input
@@ -4273,11 +4436,29 @@ export default function App() {
             </div>
             <div className="qlist">
               {(() => {
-                const hits = qh.search(ranLog, qSearch);
+                const list: qh.Ran[] = qTab === "saved" ? saved : ranLog;
+                const hits = qh.search(list, qSearch);
                 if (!hits.length)
-                  return <div className="hhint">{ranLog.length ? "ไม่เจอ SQL ที่ตรงกับคำค้น" : "ยังไม่มีประวัติ — กด Run แล้ว SQL จะมาโผล่ที่นี่"}</div>;
+                  return (
+                    <div className="hhint">
+                      {list.length
+                        ? "ไม่เจอ SQL ที่ตรงกับคำค้น"
+                        : qTab === "saved"
+                          ? "ยังไม่มี — กดดาวที่ประวัติ หรือปุ่มดาวข้าง Run (Ctrl+S)"
+                          : "ยังไม่มีประวัติ — กด Run แล้ว SQL จะมาโผล่ที่นี่"}
+                    </div>
+                  );
                 return hits.slice(0, 200).map((r) => (
                   <div key={r.id} className={"qrow" + (r.err ? " bad" : "")} onDoubleClick={() => openRan(r, true)}>
+                    {"name" in r && (
+                      <input
+                        className="qname"
+                        value={r.name as string}
+                        onDoubleClick={(e) => e.stopPropagation()}
+                        onKeyDown={(e) => e.stopPropagation()}
+                        onChange={(e) => setSaved((sv) => sv.map((x) => (x.id === r.id ? { ...x, name: e.target.value } : x)))}
+                      />
+                    )}
                     <pre>{r.sql}</pre>
                     <div className="qmeta">
                       <span>{r.connName}</span>
@@ -4292,6 +4473,13 @@ export default function App() {
                         </span>
                       )}
                       {r.n > 1 && <span>รัน {r.n} ครั้ง</span>}
+                      <button
+                        className={"btn sm star" + (qh.isSaved(saved, r) ? " on" : "")}
+                        title={qh.isSaved(saved, r) ? "เอาออกจากที่บันทึกไว้" : "บันทึกไว้ใช้ซ้ำ"}
+                        onClick={() => setSaved((sv) => qh.toggleSaved(sv, { ...r, id: uid() }))}
+                      >
+                        <Star size={13} weight={qh.isSaved(saved, r) ? "fill" : "regular"} />
+                      </button>
                       <button className="btn sm" onClick={() => openRan(r, false)}>
                         ใส่แทนใน editor
                       </button>
@@ -4303,7 +4491,7 @@ export default function App() {
                 ));
               })()}
             </div>
-            {ranLog.length > 0 && (
+            {qTab === "ran" && ranLog.length > 0 && (
               <div className="modal-foot">
                 <button
                   className={"btn sm" + (qClear ? " danger" : "")}
@@ -4692,6 +4880,19 @@ export default function App() {
             <p>
               {tab.res.rows.length.toLocaleString()} แถว · {tab.res.columns.length} คอลัมน์
             </p>
+            <button
+              className="pick"
+              onClick={() => {
+                setExportOpen(false);
+                exportAs("xlsx");
+              }}
+            >
+              <FileXls size={20} weight="duotone" />
+              <div>
+                <b>Excel (.xlsx)</b>
+                <span>ตัวเลขเป็นตัวเลขจริง คำนวณต่อใน Excel ได้ · หัวตารางตรึงไว้</span>
+              </div>
+            </button>
             <button
               className="pick"
               onClick={() => {

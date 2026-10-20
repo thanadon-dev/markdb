@@ -23,6 +23,8 @@ tokio = { version = "1", features = ["sync", "process", "io-util"] }
 csv = "1"
 futures-util = "0.3"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "json"] }
+rust_xlsxwriter = { version = "0.100.0", default-features = false }
+keyring = { version = "3", features = ["windows-native"] }
 
 [profile.release]
 opt-level = "s"

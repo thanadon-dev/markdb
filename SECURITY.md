@@ -13,6 +13,6 @@ Include what an attacker can do, the steps to reproduce, and the MarkDB version.
 
 Only the latest release gets security fixes. The app updates itself, so staying current is one click.
 
-## Known limitation
+## How credentials are stored
 
-Connection passwords are currently stored in `localStorage` as plain text. This is a known issue, planned to move to Windows Credential Manager, and doesn't need to be reported.
+Since v0.3.0, connection passwords are stored in Windows Credential Manager, tied to the Windows user. Connection files exported for sharing never contain passwords.

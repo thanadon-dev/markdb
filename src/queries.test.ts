@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { add, search, type Ran } from "./queries.ts";
+import * as qh from "./queries.ts";
 
 test("รันซ้ำ = ขยับขึ้นบนสุด ไม่เพิ่มแถว, ค้นได้หลายคำ", () => {
   const r = (id: string, sql: string, conn = "c1") => ({ id, at: 0, conn, connName: conn === "c1" ? "dev" : "uat", sql });
@@ -14,4 +15,15 @@ test("รันซ้ำ = ขยับขึ้นบนสุด ไม่เ�
   assert.deepEqual(search(l, "FROM a").map((x) => x.id), ["4", "3"]);
   assert.deepEqual(search(l, "a uat").map((x) => x.id), ["4"]);
   assert.equal(search(l, "  ").length, 3);
+});
+
+test("กดดาว: เก็บ/เอาออก, ชื่อจาก comment, ค้นด้วยชื่อได้", () => {
+  const r = { id: "1", at: 1, conn: "c", connName: "dev", sql: "-- ลูกค้าที่ active\nselect * from customer" };
+  let saved = qh.toggleSaved([], r);
+  assert.equal(saved[0].name, "ลูกค้าที่ active");
+  assert.ok(qh.isSaved(saved, { conn: "c", sql: "-- ลูกค้าที่ active\nselect *   from customer;" }));
+  assert.equal(qh.search(saved, "active").length, 1);
+  saved = qh.toggleSaved(saved, r);
+  assert.equal(saved.length, 0);
+  assert.equal(qh.nameOf("select " + "x".repeat(80)).length, 60);
 });
