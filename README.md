@@ -47,7 +47,7 @@ The installer is under 5 MB. It starts fast and uses little memory, because it r
 - Autocomplete for table names, the columns of tables in `FROM`, and real values from a column when you type `where col = '`.
 - A searchable history of every query you ran (`Ctrl+H`).
 - Right-click a cell to filter by it (equals, not equals, contains, is NULL). Paginate, or order by from the column header.
-- AI writes SQL and fixes failing queries through [Claude Code](https://claude.com/claude-code) logged in on your machine. The app never stores an API key.
+- AI writes SQL and fixes failing queries through [Claude Code](https://claude.com/claude-code) or [Codex CLI](https://github.com/openai/codex) logged in on your machine. Pick any Claude model (Haiku by default) or a Codex model. The app never stores an API key.
 
 **Safety**
 - Mark a connection as Production or read-only. On Postgres, read-only is enforced per session with read-only transactions.
@@ -105,7 +105,7 @@ MARKDB_TEST_PG=postgres://user:pass@localhost:5432/db cargo test -- --ignored
 |---|---|
 | `src-tauri/src/lib.rs` | Every command that talks to the database (sqlx) |
 | `src-tauri/src/sync.rs` | Table sync across connections |
-| `src-tauri/src/ai.rs` | Calls the `claude` CLI for AI features |
+| `src-tauri/src/ai.rs` | Calls the `claude` or `codex` CLI for AI features |
 | `src/App.tsx` | UI |
 | `src/*.ts` | Pure, tested logic: splitting SQL statements (`sqlsplit`), adding where/order/limit (`sqltail`), write guards (`guard`), history (`history`, `queries`) |
 | `src/styles.css` | Theme |

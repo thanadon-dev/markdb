@@ -46,7 +46,7 @@
 - Autocomplete รู้จักชื่อตาราง คอลัมน์ของตารางใน `FROM` และค่าที่มีจริงในคอลัมน์ตอนพิมพ์ `where col = '`
 - ประวัติ SQL ที่รันไปแล้ว ค้นหาได้ (`Ctrl+H`)
 - กรองจาก cell ได้ด้วยการคลิกขวา (เท่ากับ, ไม่เท่ากับ, มีคำนี้, เป็น NULL) และแบ่งหน้า หรือ order by จากหัวคอลัมน์
-- AI ช่วยเขียนและแก้ SQL ที่ error ผ่าน [Claude Code](https://claude.com/claude-code) ที่ login ไว้ในเครื่อง ตัวแอปไม่ต้องเก็บ API key
+- AI ช่วยเขียนและแก้ SQL ที่ error ผ่าน [Claude Code](https://claude.com/claude-code) หรือ [Codex CLI](https://github.com/openai/codex) ที่ login ไว้ในเครื่อง เลือก model ของ Claude ได้ทุกรุ่น (ค่าเริ่มต้นคือ Haiku) หรือ model ของ Codex ตัวแอปไม่ต้องเก็บ API key
 
 **กันพลาด**
 - ติดป้าย Production หรืออ่านอย่างเดียวให้แต่ละ connection ได้ บน Postgres ใช้ read-only transaction บังคับที่ระดับ session
@@ -103,7 +103,7 @@ MARKDB_TEST_PG=postgres://user:pass@localhost:5432/db cargo test -- --ignored
 |---|---|
 | `src-tauri/src/lib.rs` | คำสั่งที่คุยกับ DB ทั้งหมด (sqlx) |
 | `src-tauri/src/sync.rs` | sync ตารางข้าม connection |
-| `src-tauri/src/ai.rs` | เรียก `claude` CLI สำหรับ AI |
+| `src-tauri/src/ai.rs` | เรียก `claude` หรือ `codex` CLI สำหรับ AI |
 | `src/App.tsx` | UI |
 | `src/*.ts` | logic ล้วนที่เทสต์ได้ เช่น ตัดคำสั่ง SQL (`sqlsplit`), เติม where/order/limit (`sqltail`), กันพลาด (`guard`), ประวัติ (`history`, `queries`) |
 | `src/styles.css` | ธีม |

@@ -2,6 +2,17 @@
 
 All notable changes to MarkDB. Release notes are written in Thai.
 
+## [v0.2.1](https://github.com/thanadon-dev/markdb/releases/tag/v0.2.1) — 2026-10-20
+
+### แก้ไข
+
+- **connection ที่ host เดียวกันแต่คนละ database ต่อไป database เดียวกันหมด** — ถ้าวาง URL (`postgres://…`) ไว้ในช่อง Host แอปจะใช้ URL นั้นตรง ๆ แล้วไม่สนช่อง Database / Port / User / Password ที่แก้ทีหลัง ตอนนี้วาง URL แล้วแตกเป็นช่องให้ทันที และ connection เก่าที่เก็บเป็น URL ถูกแปลงให้เองตอนเปิดแอป
+
+### ใหม่
+
+- **AI เลือกได้ทุก model** — Claude Haiku 5.5 (ค่าเริ่มต้น), Sonnet 5.5, Opus 5.5, Fable 5.1
+- **ใช้ Codex CLI ได้ด้วย** — เลือก GPT-5.6 Terra / Luna จากเมนูเดียวกัน ใช้บัญชี Codex ที่ login ไว้ในเครื่อง (`codex login`)
+
 ## [v0.2.0](https://github.com/thanadon-dev/markdb/releases/tag/v0.2.0) — 2026-10-19
 
 ### ใหม่

@@ -12,6 +12,7 @@ import { parseTsv, pasteCells, suggest } from "./newrow";
 import { risk } from "./guard";
 import * as qh from "./queries";
 import { grouped, renameGroup } from "./groups";
+import { fromUrl } from "./connurl";
 import * as hist from "./history";
 import { PostgreSQL, sql as sqlLang } from "@codemirror/lang-sql";
 import { createTheme } from "@uiw/codemirror-themes";
@@ -288,13 +289,18 @@ const connUrl = (c: Conn) => {
   }`;
 };
 
+/* URL ที่วางไว้ในช่อง Host → แตกเป็นช่อง ไม่งั้น Database / Port / User ที่แก้ทีหลังไม่มีผล
+   (เคยทำให้ host เดียวกันคนละ database ไปต่อ database เดิม) — แตกไม่ได้ก็ใช้ URL ตรง ๆ แบบเดิม */
+const splitUrl = (c: Conn): Conn => {
+  const p = c.url ? fromUrl(c.url) : null;
+  return p ? { ...c, ...p, port: p.port || PORTS[c.engine ?? "postgres"], url: undefined } : c;
+};
+
 const loadConns = (): Conn[] => {
   try {
-    return JSON.parse(localStorage.getItem(CONNS_KEY) || "[]").map((c: Conn) => ({
-      ...BLANK,
-      ...c,
-      engine: c.engine ?? "postgres",
-    }));
+    return JSON.parse(localStorage.getItem(CONNS_KEY) || "[]").map((c: Conn) =>
+      splitUrl({ ...BLANK, ...c, engine: c.engine ?? "postgres" }),
+    );
   } catch {
     return [];
   }
@@ -330,19 +336,26 @@ const loadTabs = () => {
 
 const BOOT = loadTabs();
 
-/* ---------- AI เขียน SQL (ผ่าน claude CLI ของผู้ใช้) ---------- */
+/* ---------- AI เขียน SQL (ผ่าน claude / codex CLI ของผู้ใช้) ---------- */
 
 type AiPrefs = { model: string; effort: string };
+/* model ที่ไม่ขึ้นต้นด้วย claude- ฝั่ง Rust ส่งให้ codex CLI */
 const AI_MODELS = [
-  { id: "claude-sonnet-5", name: "Sonnet 5" },
-  { id: "claude-opus-5", name: "Opus 5" },
+  { cli: "Claude Code", id: "claude-haiku-5-5", name: "Haiku 5.5" },
+  { cli: "Claude Code", id: "claude-sonnet-5-5", name: "Sonnet 5.5" },
+  { cli: "Claude Code", id: "claude-opus-5-5", name: "Opus 5.5" },
+  { cli: "Claude Code", id: "claude-fable-5-1", name: "Fable 5.1" },
+  { cli: "Codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
+  { cli: "Codex", id: "gpt-5.6-luna", name: "GPT-5.6 Luna" },
 ];
 const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 const loadAi = (): AiPrefs => {
-  const def = { model: "claude-sonnet-5", effort: "medium" };
+  const def = { model: "claude-haiku-5-5", effort: "medium" };
   try {
-    return { ...def, ...JSON.parse(localStorage.getItem(AI_KEY) || "{}") };
+    const p = { ...def, ...JSON.parse(localStorage.getItem(AI_KEY) || "{}") };
+    // ค่าที่จำไว้เป็นรุ่นที่เลิกใช้แล้ว (เช่น claude-sonnet-5) → กลับไปค่าเริ่มต้น
+    return AI_MODELS.some((m) => m.id === p.model) ? p : { ...p, model: def.model };
   } catch {
     return def;
   }
@@ -3523,7 +3536,7 @@ export default function App() {
           <button
             className={"btn sm" + (aiOpen ? " on" : "")}
             onClick={() => setAiOpen((o) => !o)}
-            title="ให้ AI เขียน SQL จากคำอธิบาย (ใช้ claude CLI ที่ login ไว้ในเครื่อง)"
+            title="ให้ AI เขียน SQL จากคำอธิบาย (ใช้ Claude Code หรือ Codex CLI ที่ login ไว้ในเครื่อง)"
           >
             <Sparkle size={14} weight="duotone" /> AI <span style={{ opacity: 0.55 }}>Ctrl+K</span>
           </button>
@@ -3619,10 +3632,14 @@ export default function App() {
               onChange={(e) => setAi({ ...ai, model: e.target.value })}
               title="โมเดล"
             >
-              {AI_MODELS.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
+              {[...new Set(AI_MODELS.map((m) => m.cli))].map((cli) => (
+                <optgroup key={cli} label={cli}>
+                  {AI_MODELS.filter((m) => m.cli === cli).map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
             <select
@@ -3890,6 +3907,7 @@ export default function App() {
                 <input
                   placeholder="localhost หรือ postgres://…"
                   value={form.url ?? form.host}
+                  onBlur={() => setForm((f) => f && splitUrl(f))}
                   onChange={(e) => {
                     const v = e.target.value;
                     // วาง URL มา → เก็บเป็น URL ล้วนแทนการแยกช่อง
@@ -3991,7 +4009,8 @@ export default function App() {
               <button
                 className="btn primary sm"
                 onClick={() => {
-                  const c = { ...form, name: form.name.trim() || form.db || form.engine };
+                  const f = splitUrl(form);
+                  const c = { ...f, name: f.name.trim() || f.db || f.engine };
                   setConns((cs) =>
                     cs.some((x) => x.id === c.id)
                       ? cs.map((x) => (x.id === c.id ? c : x))
