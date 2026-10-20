@@ -2634,3 +2634,16 @@ select:focus {
 .cghead .cgname svg.open {
   transform: rotate(90deg);
 }
+
+/* error ของ connection ค้างไว้บรรทัดล่างจนกว่าจะลองใหม่ */
+.conn:has(.connerr) {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+.conn .connerr {
+  order: 1;
+  flex-basis: 100%;
+  padding-left: 23px;
+  font-size: 11px;
+  color: var(--red);
+}

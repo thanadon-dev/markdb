@@ -2132,6 +2132,7 @@ export default function App() {
   const [conns, setConns] = useState<Conn[]>(loadConns);
   const [activeConn, setActiveConn] = useState<string>("");
   const [live, setLive] = useState<Record<string, Meta>>({});
+  const [connErr, setConnErr] = useState<Record<string, string>>({});
   const [filter, setFilter] = useState("");
   const [picked, setPicked] = useState<TableInfo | null>(null);
   const [tabs, setTabs] = useState<Tab[]>(BOOT.tabs);
@@ -2383,10 +2384,19 @@ export default function App() {
     async (c: Conn) => {
       setBusy(true);
       setConnecting(c.id);
+      // error ค้างไว้ใต้ชื่อ connection จนกว่าจะลองใหม่ — toast หายใน 3 วิ อ่านไม่ทัน
+      const fail = (m: string) => setConnErr((x) => ({ ...x, [c.id]: m }));
+      setConnErr(({ [c.id]: _, ...rest }) => rest);
       try {
         const info = await invoke<ConnInfo>("connect", { conn: c.id, url: connUrl(c), readonly: !!c.readonly });
         setActiveConn(c.id);
-        await loadMeta(c.id);
+        try {
+          await loadMeta(c.id);
+        } catch (e) {
+          // ต่อติดแล้วแต่อ่านรายการตารางไม่ได้ (สิทธิ์ / external schema) — ยังรัน query ได้ อย่านับว่าไม่ได้เชื่อมต่อ
+          setLive((l) => ({ ...l, [c.id]: { tables: [], schema: {}, cols: [] } }));
+          fail(`เชื่อมต่อได้ แต่โหลดรายการตารางไม่ได้: ${e}`);
+        }
         // เลือกผิดก็ยังใช้ได้ — จำค่าที่ตรวจได้จริงไว้แทน
         if (info.engine !== c.engine) {
           setConns((cs) => cs.map((x) => (x.id === c.id ? { ...x, engine: info.engine } : x)));
@@ -2395,6 +2405,7 @@ export default function App() {
           say(`เชื่อมต่อ ${c.name} แล้ว`);
         }
       } catch (e) {
+        fail(String(e));
         say(String(e));
       } finally {
         setBusy(false);
@@ -3352,6 +3363,11 @@ export default function App() {
                   >
                     <PencilSimple size={13} />
                   </span>
+                  {connErr[c.id] && (
+                    <span className="connerr" title={connErr[c.id]}>
+                      {connErr[c.id]}
+                    </span>
+                  )}
                   <span
                     className="x"
                     style={{ marginLeft: 4 }}

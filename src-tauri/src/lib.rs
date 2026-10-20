@@ -1790,6 +1790,32 @@ mod tests {
         rw.execute("drop table markdb_ro_t").await.unwrap();
     }
 
+    /// host เดียวกันคนละ database เปิดค้างพร้อมกันได้ และแต่ละ pool เห็นตารางของ database ตัวเอง
+    #[tokio::test]
+    #[ignore]
+    async fn two_databases_same_host() {
+        let base = std::env::var("MARKDB_TEST_PG").expect("ตั้ง MARKDB_TEST_PG ก่อน");
+        let admin = PgPool::connect(&format!("{}/postgres", base)).await.unwrap();
+        for db in ["markdb_two_a", "markdb_two_b"] {
+            admin.execute(format!("drop database if exists {db} with (force)").as_str()).await.unwrap();
+            admin.execute(format!("create database {db}").as_str()).await.unwrap();
+        }
+        let a = pool_options(false).connect(&format!("{}/markdb_two_a", base)).await.unwrap();
+        let b = pool_options(false).connect(&format!("{}/markdb_two_b", base)).await.unwrap();
+        a.execute("create table only_in_a (id int)").await.unwrap();
+        b.execute("create table only_in_b (id int)").await.unwrap();
+        let q = "select table_name::text from information_schema.tables where table_schema = 'public'";
+        let ta: Vec<(String,)> = sqlx::query_as(q).fetch_all(&a).await.unwrap();
+        let tb: Vec<(String,)> = sqlx::query_as(q).fetch_all(&b).await.unwrap();
+        assert_eq!(ta, [("only_in_a".to_string(),)]);
+        assert_eq!(tb, [("only_in_b".to_string(),)]);
+        a.close().await;
+        b.close().await;
+        for db in ["markdb_two_a", "markdb_two_b"] {
+            admin.execute(format!("drop database {db} with (force)").as_str()).await.unwrap();
+        }
+    }
+
     #[test]
     fn duplicate_columns_get_suffixed() {
         let mut c: Vec<String> = ["id", "name", "id", "id"].iter().map(|s| s.to_string()).collect();

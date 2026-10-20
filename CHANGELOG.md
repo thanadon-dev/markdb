@@ -2,6 +2,13 @@
 
 All notable changes to MarkDB. Release notes are written in Thai.
 
+## [v0.2.2](https://github.com/thanadon-dev/markdb/releases/tag/v0.2.2) — 2026-10-20
+
+### แก้ไข
+
+- **connection ที่ต่อได้แต่โหลดรายการตารางไม่ได้ ถูกนับว่าไม่ได้เชื่อมต่อ** — เช่น database ที่ user ไม่มีสิทธิ์อ่านบาง schema ตอนนี้ยังนับว่าเชื่อมต่อแล้ว รัน query ได้ปกติ แค่แถบซ้ายไม่มีรายการตาราง
+- **error ตอนเชื่อมต่อค้างอยู่ใต้ชื่อ connection** (ตัวแดง เอาเมาส์ชี้ดูข้อความเต็มได้) จนกว่าจะลองใหม่ เดิมขึ้นแค่ 3 วินาทีแล้วหาย
+
 ## [v0.2.1](https://github.com/thanadon-dev/markdb/releases/tag/v0.2.1) — 2026-10-20
 
 ### แก้ไข
