@@ -2,7 +2,7 @@
 
 # MarkDB
 
-**A lightweight, fast SQL client for PostgreSQL and Amazon Redshift**
+**A lightweight, fast SQL client for PostgreSQL, Amazon Redshift, MySQL / MariaDB and SQLite**
 
 [![release](https://img.shields.io/github/v/release/thanadon-dev/markdb?style=flat-square&color=222)](https://github.com/thanadon-dev/markdb/releases/latest)
 [![downloads](https://img.shields.io/github/downloads/thanadon-dev/markdb/total?style=flat-square&color=222)](https://github.com/thanadon-dev/markdb/releases)
@@ -34,6 +34,8 @@ The installer is under 5 MB. It starts fast and uses little memory, because it r
 |---|---|
 | PostgreSQL 12+ | All features |
 | Amazon Redshift | Pick it when creating a connection; port and SSL are set for you (some features are not supported yet, see below) |
+| MySQL 5.7+ / MariaDB | Browse, query, edit, ER diagram, query plan, sessions. No backup / CSV import / sync yet |
+| SQLite | Open a `.db` file. Browse, query, edit, ER diagram, query plan. No backup / CSV import / sync yet |
 
 ## Features
 
@@ -47,6 +49,8 @@ The installer is under 5 MB. It starts fast and uses little memory, because it r
 - Autocomplete for table names, the columns of tables in `FROM`, and real values from a column when you type `where col = '`.
 - A searchable history of every query you ran (`Ctrl+H`). Star a query (or press `Ctrl+S` in the editor) to keep it with a name.
 - Right-click a cell to filter by it (equals, not equals, contains, is NULL). Paginate, or order by from the column header.
+- Run several statements at once and switch between each statement's result.
+- Format SQL (`Shift+Alt+F`) in the dialect of the connection.
 - AI writes SQL and fixes failing queries through [Claude Code](https://claude.com/claude-code) or [Codex CLI](https://github.com/openai/codex) logged in on your machine. Pick any Claude model (Haiku by default) or a Codex model. The app never stores an API key.
 
 **Safety**
@@ -55,6 +59,9 @@ The installer is under 5 MB. It starts fast and uses little memory, because it r
 - Delete and drop confirmations make you wait 3 seconds before the button unlocks.
 
 **Tools**
+- Query plan (`Ctrl+E`) drawn as a tree. Explain Analyze runs the query for real timings inside a transaction that is always rolled back, highlights the slowest step, and flags full-table scans and bad row estimates.
+- Sessions: who is connected, who is waiting on a lock and who holds it. Cancel a query or end a session.
+- Chart any result as bars or lines.
 - An ER diagram built from every foreign key in the database.
 - Back up and restore a whole database as a single `.sql` file, without `pg_dump`.
 - Sync tables across connections (for example dev to uat), both schema and data.
@@ -62,6 +69,7 @@ The installer is under 5 MB. It starts fast and uses little memory, because it r
 
 **Everyday use**
 - Connection passwords are kept in Windows Credential Manager, not in the app's storage.
+- Connect through an SSH tunnel (bastion / jump host) with a password or private key. The server's host key is remembered on first connect and checked every time after.
 - Connections are grouped by host automatically. Rename or collapse groups. Share the connection list with your team as a file (passwords are never included).
 - Dark and light themes, or follow the Windows setting.
 - A virtualized grid keeps thousands of rows scrolling smoothly.
@@ -78,7 +86,8 @@ Download `MarkDB_x.y.z_x64-setup.exe` from [Releases](https://github.com/thanado
 
 - Backups don't include triggers, functions, extensions, GRANTs or partitions.
 - Redshift: whole-database backup isn't supported, CSV import uses `INSERT` instead of `COPY`, and read-only mode is enforced only in the app.
-- Windows x64 only.
+- MySQL / SQLite: no whole-database backup, CSV import or table sync yet. Editing cells needs a primary key (Postgres also accepts a unique index).
+- Installers are Windows x64 only for now. The code builds for macOS and Linux, but those builds are not published or tested yet.
 
 ## Development
 
@@ -106,6 +115,8 @@ MARKDB_TEST_PG=postgres://user:pass@localhost:5432/db cargo test -- --ignored
 |---|---|
 | `src-tauri/src/lib.rs` | Every command that talks to the database (sqlx) |
 | `src-tauri/src/sync.rs` | Table sync across connections |
+| `src-tauri/src/other.rs` | SQLite and MySQL / MariaDB |
+| `src-tauri/src/tunnel.rs` | SSH tunnel |
 | `src-tauri/src/ai.rs` | Calls the `claude` or `codex` CLI for AI features |
 | `src/App.tsx` | UI |
 | `src/*.ts` | Pure, tested logic: splitting SQL statements (`sqlsplit`), adding where/order/limit (`sqltail`), write guards (`guard`), history (`history`, `queries`) |

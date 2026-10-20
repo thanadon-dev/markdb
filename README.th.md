@@ -2,7 +2,7 @@
 
 # MarkDB
 
-**SQL client ที่เบาและเร็ว สำหรับ PostgreSQL และ Amazon Redshift**
+**SQL client ที่เบาและเร็ว สำหรับ PostgreSQL, Amazon Redshift, MySQL / MariaDB และ SQLite**
 
 [![release](https://img.shields.io/github/v/release/thanadon-dev/markdb?style=flat-square&color=222)](https://github.com/thanadon-dev/markdb/releases/latest)
 [![downloads](https://img.shields.io/github/downloads/thanadon-dev/markdb/total?style=flat-square&color=222)](https://github.com/thanadon-dev/markdb/releases)
@@ -33,6 +33,8 @@
 |---|---|
 | PostgreSQL 12+ | ครบทุกฟีเจอร์ |
 | Amazon Redshift | เลือกตอนสร้าง connection ตั้งพอร์ตและ SSL ให้เอง (บางฟีเจอร์ยังไม่รองรับ ดูด้านล่าง) |
+| MySQL 5.7+ / MariaDB | ดูตาราง รัน query แก้ข้อมูล ER diagram query plan session ยังไม่มี backup / import CSV / sync |
+| SQLite | เปิดไฟล์ `.db` ดูตาราง รัน query แก้ข้อมูล ER diagram query plan ยังไม่มี backup / import CSV / sync |
 
 ## ฟีเจอร์
 
@@ -46,6 +48,8 @@
 - Autocomplete รู้จักชื่อตาราง คอลัมน์ของตารางใน `FROM` และค่าที่มีจริงในคอลัมน์ตอนพิมพ์ `where col = '`
 - ประวัติ SQL ที่รันไปแล้ว ค้นหาได้ (`Ctrl+H`) กดดาว (หรือ `Ctrl+S` ใน editor) เพื่อเก็บ query ที่ใช้บ่อยไว้พร้อมตั้งชื่อ
 - กรองจาก cell ได้ด้วยการคลิกขวา (เท่ากับ, ไม่เท่ากับ, มีคำนี้, เป็น NULL) และแบ่งหน้า หรือ order by จากหัวคอลัมน์
+- รันหลายคำสั่งพร้อมกันแล้วสลับดูผลของแต่ละคำสั่งได้
+- จัดรูป SQL (`Shift+Alt+F`) ตามชนิดของ database
 - AI ช่วยเขียนและแก้ SQL ที่ error ผ่าน [Claude Code](https://claude.com/claude-code) หรือ [Codex CLI](https://github.com/openai/codex) ที่ login ไว้ในเครื่อง เลือก model ของ Claude ได้ทุกรุ่น (ค่าเริ่มต้นคือ Haiku) หรือ model ของ Codex ตัวแอปไม่ต้องเก็บ API key
 
 **กันพลาด**
@@ -54,6 +58,9 @@
 - ก่อนลบหรือ drop ต้องรอ 3 วินาทีก่อนกดยืนยัน
 
 **เครื่องมือ**
+- Query plan (`Ctrl+E`) แบบต้นไม้ กด Explain Analyze เพื่อรันจริงจับเวลา (อยู่ใน transaction แล้ว rollback เสมอ) ไฮไลต์ขั้นที่ช้าที่สุด และเตือนจุดที่อ่านทั้งตารางหรือประมาณจำนวนแถวพลาด
+- ดู session ว่าใครต่ออยู่ ใครรอ lock และใครถือ lock ไว้ ยกเลิก query หรือตัด session ได้
+- กราฟแท่งหรือเส้นจากผลลัพธ์
 - ER diagram ที่อ่าน foreign key ทั้ง database
 - Backup และ restore ทั้ง database เป็นไฟล์ `.sql` เดียว โดยไม่ต้องมี `pg_dump`
 - Sync ตารางข้าม connection (เช่น dev ไป uat) ทั้งโครงสร้างและข้อมูล
@@ -61,6 +68,7 @@
 
 **ใช้งานทั่วไป**
 - password ของ connection เก็บใน Windows Credential Manager ไม่ได้เก็บในที่เก็บข้อมูลของแอป
+- ต่อผ่าน SSH tunnel (bastion / jump host) ด้วย password หรือ private key จำ host key ของ server ตั้งแต่ต่อครั้งแรกแล้วตรวจทุกครั้ง
 - จัดกลุ่ม connection ตาม host ให้อัตโนมัติ ตั้งชื่อกลุ่มเองหรือพับเก็บได้ ส่งรายการ connection ให้คนในทีมเป็นไฟล์ได้ (ไม่มี password ติดไปด้วย)
 - ธีมมืดและสว่าง หรือให้เปลี่ยนตาม Windows
 - ตารางหลักพันแถวเลื่อนลื่นเพราะ virtualize grid
@@ -77,7 +85,8 @@
 
 - backup ยังไม่รวม trigger, function, extension, GRANT และ partition
 - Redshift ยัง backup ทั้ง database ไม่ได้ import CSV ใช้ INSERT แทน `COPY` และโหมดอ่านอย่างเดียวบังคับแค่ในแอป
-- รองรับแค่ Windows x64
+- MySQL / SQLite: ยังไม่มี backup ทั้ง database, import CSV และ sync ตาราง การแก้ค่าใน cell ต้องมี primary key (Postgres ใช้ unique index แทนได้)
+- ตัวติดตั้งตอนนี้มีแค่ Windows x64 โค้ด build บน macOS และ Linux ได้แล้ว แต่ยังไม่ได้ปล่อยและยังไม่ได้ทดสอบ
 
 ## พัฒนา
 
@@ -104,6 +113,8 @@ MARKDB_TEST_PG=postgres://user:pass@localhost:5432/db cargo test -- --ignored
 |---|---|
 | `src-tauri/src/lib.rs` | คำสั่งที่คุยกับ DB ทั้งหมด (sqlx) |
 | `src-tauri/src/sync.rs` | sync ตารางข้าม connection |
+| `src-tauri/src/other.rs` | SQLite และ MySQL / MariaDB |
+| `src-tauri/src/tunnel.rs` | SSH tunnel |
 | `src-tauri/src/ai.rs` | เรียก `claude` หรือ `codex` CLI สำหรับ AI |
 | `src/App.tsx` | UI |
 | `src/*.ts` | logic ล้วนที่เทสต์ได้ เช่น ตัดคำสั่ง SQL (`sqlsplit`), เติม where/order/limit (`sqltail`), กันพลาด (`guard`), ประวัติ (`history`, `queries`) |
