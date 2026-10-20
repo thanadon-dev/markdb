@@ -1,6 +1,6 @@
 name: release
 
-# build, เซ็น, ปล่อย Release พร้อม latest.json ที่ตัวแอปใช้เช็คอัปเดต
+# build, เซ็น, ปล่อย Release พร้อม latest.json ที่ตัวแอปใช้เช็คอัปเดต — Windows / macOS / Linux
 # รันเองจากแท็บ Actions เท่านั้น — ตอนนี้ release ทำในเครื่อง maintainer
 # (ปลด push tags ออก ไม่งั้นทุก tag ขึ้นกากบาทแดงตอน Actions ใช้ไม่ได้)
 on:
@@ -8,7 +8,18 @@ on:
 
 jobs:
   release:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            args: ""
+          # universal = ไฟล์เดียวใช้ได้ทั้ง Intel และ Apple Silicon
+          - os: macos-latest
+            args: "--target universal-apple-darwin"
+          - os: ubuntu-22.04
+            args: ""
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: write
 
@@ -21,6 +32,14 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ startsWith(matrix.os, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Linux packages ที่ Tauri ต้องใช้
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -38,7 +57,8 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: MarkDB ${{ github.ref_name }}
-          releaseBody: ดาวน์โหลด MarkDB_x.y.z_x64-setup.exe แล้วติดตั้งได้เลย
+          releaseBody: ดาวน์โหลดไฟล์ติดตั้งของระบบที่ใช้ — Windows (.exe), macOS (.dmg), Linux (.AppImage / .deb)
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
+          args: ${{ matrix.args }}
