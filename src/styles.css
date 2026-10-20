@@ -45,6 +45,10 @@
   --on-red: #1a0000;
   --red-hover: #ff8a8a;
   --shadow: rgba(0, 0, 0, 0.7);
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
   color-scheme: dark;
 }
 
@@ -95,6 +99,10 @@
   --on-red: #fff;
   --red-hover: #b91c1c;
   --shadow: rgba(0, 0, 0, 0.16);
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
   color-scheme: light;
 }
 @media (prefers-color-scheme: light) {
@@ -144,6 +152,10 @@
     --on-red: #fff;
     --red-hover: #b91c1c;
     --shadow: rgba(0, 0, 0, 0.16);
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --series-3: #1baf7a;
+    --series-4: #eda100;
     color-scheme: light;
   }
 }
@@ -718,6 +730,9 @@ select:focus {
   border-radius: 14px;
   padding: 20px;
   box-shadow: 0 24px 60px var(--shadow);
+  /* ฟอร์มยาว (เช่นเปิด SSH) บนจอเตี้ย — เลื่อนในหน้าต่างได้ ปุ่มล่างไม่หลุดจอ */
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
 }
 
 .modal h3 {
@@ -2845,4 +2860,409 @@ select:focus {
 .themebtn:hover {
   color: var(--text);
   background: var(--panel);
+}
+
+/* SQLite: ช่อง path + ปุ่มเลือกไฟล์ */
+.filepick {
+  display: flex;
+  gap: 6px;
+}
+.filepick .btn {
+  flex: none;
+}
+
+/* รันหลายคำสั่ง: เลือกดูผลทีละคำสั่ง */
+.setbar {
+  display: flex;
+  gap: 6px;
+  padding: 6px 10px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.setbar button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  max-width: 320px;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--dim);
+  font-size: 11.5px;
+}
+.setbar button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: Consolas, monospace;
+}
+.setbar button em {
+  font-style: normal;
+  opacity: 0.7;
+  white-space: nowrap;
+}
+.setbar button:hover {
+  color: var(--text);
+}
+.setbar button.on {
+  color: var(--text);
+  border-color: var(--g-focus);
+  background: var(--accent-soft);
+}
+
+/* ---------- Query plan (Explain) ---------- */
+.explain {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.exhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.exhead span {
+  color: var(--dim);
+  font-size: 12px;
+  margin-right: auto;
+}
+.exlist {
+  overflow: auto;
+  padding: 6px 0 12px;
+}
+.exrow {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--g-line);
+}
+.exrow.hot {
+  background: rgba(255, 107, 107, 0.07);
+  box-shadow: inset 3px 0 0 var(--red);
+}
+.exmain {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.exdetail {
+  color: var(--sky);
+  font-family: Consolas, monospace;
+  font-size: 12px;
+}
+.exnums {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.exnums b {
+  color: var(--text);
+}
+.exnums em {
+  font-style: normal;
+  opacity: 0.75;
+}
+.exms {
+  display: inline-block;
+  min-width: 70px;
+  margin-left: 10px;
+  text-align: right;
+}
+.exbar {
+  height: 3px;
+  margin-top: 5px;
+  border-radius: 2px;
+  background: var(--g-track);
+}
+.exbar i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--red);
+}
+.excond {
+  display: block;
+  margin-top: 4px;
+  color: var(--dim);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.exwarn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  color: var(--yellow);
+  font-size: 12px;
+}
+.extext {
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  white-space: pre;
+}
+
+/* ---------- Sessions / locks ---------- */
+.sessions .sxwait {
+  color: var(--red);
+}
+.sxbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 8px;
+}
+.sxbar .btn {
+  margin-left: auto;
+}
+.sxmsg {
+  margin-bottom: 8px;
+  color: var(--dim);
+  font-size: 12px;
+}
+.sxlist {
+  display: grid;
+  gap: 6px;
+  max-height: 56vh;
+  overflow: auto;
+}
+.sxrow {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.sxrow.waiting {
+  border-color: rgba(255, 107, 107, 0.45);
+  background: rgba(255, 107, 107, 0.05);
+}
+.sxrow.blocker {
+  border-color: rgba(251, 191, 36, 0.5);
+  background: rgba(251, 191, 36, 0.05);
+}
+.sxhead {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+.sxdim {
+  color: var(--dim);
+  font-size: 11.5px;
+}
+.sxstate {
+  padding: 0 6px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--dim);
+  font-size: 11px;
+}
+.sxstate.on {
+  color: var(--green);
+}
+.sxtime {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.sxnote {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  font-size: 12px;
+}
+.sxnote.sxbad {
+  color: var(--err-text);
+}
+.sxnote.sxamber {
+  color: var(--yellow);
+}
+.sxrow pre {
+  margin: 6px 0 0;
+  max-height: 4.6em;
+  overflow: hidden;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.sxact {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+  opacity: 0;
+}
+.sxrow:hover .sxact,
+.sxact:has(.danger) {
+  opacity: 1;
+}
+
+/* ---------- กราฟจากผลลัพธ์ ---------- */
+.chart {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.chbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--dim);
+  flex: none;
+}
+.chbar label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.chbar select {
+  width: auto;
+  padding: 3px 8px;
+}
+.chys {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.chys button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--dim);
+}
+.chys button.on {
+  color: var(--text);
+  border-color: var(--g-focus);
+}
+.chys button:disabled {
+  opacity: 0.4;
+}
+.chys i,
+.chlegend i,
+.chtip i {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  flex: none;
+}
+.chdim {
+  color: var(--dimmer);
+}
+.chplot {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+.chplot svg {
+  display: block;
+}
+.chgrid {
+  stroke: var(--g-line);
+  stroke-width: 1;
+}
+.chtick {
+  fill: var(--dim);
+  font-size: 10.5px;
+}
+.chend {
+  fill: var(--text);
+  font-size: 11px;
+}
+.chcross {
+  stroke: var(--g-focus);
+  stroke-width: 1;
+}
+.chline {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.chdot {
+  stroke: var(--bg);
+  stroke-width: 2;
+}
+.chtip {
+  position: absolute;
+  min-width: 150px;
+  max-width: 220px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 8px 24px var(--shadow);
+  font-size: 12px;
+  pointer-events: none;
+}
+.chtip > b {
+  display: block;
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chtip div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dim);
+}
+.chtip div b {
+  margin-left: auto;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.chlegend {
+  display: flex;
+  gap: 14px;
+  padding: 6px 12px 10px;
+  font-size: 12px;
+  color: var(--dim);
+  flex: none;
+}
+.chlegend span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ฟอร์ม connection: SSH tunnel */
+.sshbox {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.sshbox .field:first-of-type {
+  margin-top: 8px;
+}
+.sshfp {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--dim);
+}
+.sshfp code {
+  word-break: break-all;
+}
+.sshfp .btn {
+  margin-left: auto;
+  flex: none;
 }

@@ -5,8 +5,54 @@ use std::collections::HashMap;
 use std::time::Instant;
 use tokio::sync::Mutex;
 
+/// แยกผลของแต่ละคำสั่ง: แถวที่มาก่อน "จบคำสั่ง" (Either::Left) เป็นของคำสั่งนั้น
+/// ใช้ได้กับทุก driver — $cell คือฟังก์ชันแปลง cell ของ driver นั้นเป็น JSON
+macro_rules! result_sets {
+    ($stream:expr, $cell:expr) => {{
+        use futures_util::TryStreamExt;
+        let mut stream = $stream;
+        let mut sets: Vec<ResultSet> = Vec::new();
+        let mut cur = ResultSet::default();
+        let mut seen = 0usize;
+        while let Some(item) = stream.try_next().await.map_err(err)? {
+            match item {
+                sqlx::Either::Left(res) => {
+                    cur.affected = if cur.columns.is_empty() { res.rows_affected() } else { seen as u64 };
+                    cur.truncated = seen > MAX_ROWS;
+                    sets.push(std::mem::take(&mut cur));
+                    seen = 0;
+                }
+                sqlx::Either::Right(row) => {
+                    if cur.columns.is_empty() {
+                        cur.columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+                        dedupe(&mut cur.columns);
+                    }
+                    seen += 1;
+                    if cur.rows.len() < MAX_ROWS {
+                        let mut obj = serde_json::Map::with_capacity(cur.columns.len());
+                        for (i, c) in cur.columns.iter().enumerate() {
+                            obj.insert(c.clone(), $cell(&row, i)?);
+                        }
+                        cur.rows.push(serde_json::Value::Object(obj));
+                    }
+                }
+            }
+        }
+        drop(stream);
+        // driver ที่ไม่ส่ง "จบคำสั่ง" ปิดท้ายชุดสุดท้าย
+        if seen > 0 {
+            cur.affected = seen as u64;
+            cur.truncated = seen > MAX_ROWS;
+            sets.push(cur);
+        }
+        sets
+    }};
+}
+
 mod ai;
+mod other;
 mod sync;
+mod tunnel;
 
 const MAX_ROWS: usize = 5000;
 
@@ -34,8 +80,12 @@ struct Db {
 }
 
 /// หลาย connection พร้อมกัน — key คือ id ของ connection ฝั่ง UI
+/// Postgres/Redshift อยู่ใน conns, SQLite/MySQL อยู่ใน others (driver คนละตัว)
 struct AppState {
     conns: Mutex<HashMap<String, Db>>,
+    others: Mutex<HashMap<String, other::Other>>,
+    /// SSH tunnel ของ connection ที่ต่อผ่าน bastion — ตัดการเชื่อมต่อแล้ว drop = ปิด tunnel
+    tunnels: Mutex<HashMap<String, tunnel::Tunnel>>,
 }
 
 #[derive(Serialize)]
@@ -47,6 +97,36 @@ struct QueryResult {
     truncated: bool,
     /// DELETE ที่พิมพ์เองจาก editor: แถวที่ถูกลบ เก็บไว้ให้ประวัติย้อนกลับได้
     deleted: Option<Deleted>,
+    /// รันหลายคำสั่งพร้อมกัน: ผลของทุกคำสั่งตามลำดับ (คำสั่งเดียว = ว่าง)
+    sets: Vec<ResultSet>,
+}
+
+/// ผลของคำสั่งเดียว
+#[derive(Serialize, Default, Clone)]
+struct ResultSet {
+    columns: Vec<String>,
+    rows: Vec<serde_json::Value>,
+    affected: u64,
+    truncated: bool,
+}
+
+/// ตัวที่โชว์เป็นหลัก = ชุดสุดท้ายที่มีคอลัมน์ (select) ไม่มีก็ชุดสุดท้าย
+fn into_result(sets: Vec<ResultSet>, t0: Instant) -> QueryResult {
+    let main = sets
+        .iter()
+        .rposition(|s| !s.columns.is_empty())
+        .or(sets.len().checked_sub(1))
+        .map(|i| sets[i].clone())
+        .unwrap_or_default();
+    QueryResult {
+        columns: main.columns,
+        rows: main.rows,
+        affected: main.affected,
+        truncated: main.truncated,
+        elapsed_ms: t0.elapsed().as_millis(),
+        deleted: None,
+        sets: if sets.len() > 1 { sets } else { Vec::new() },
+    }
 }
 
 #[derive(Serialize)]
@@ -120,6 +200,7 @@ async fn run_delete(p: &PgPool, sql: &str, table: String, select: &str) -> R<Que
         elapsed_ms: t0.elapsed().as_millis(),
         truncated: false,
         deleted: Some(Deleted { table, rows, partial }),
+        sets: Vec::new(),
     })
 }
 
@@ -137,13 +218,18 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 }
 
 async fn db(state: &AppState, conn: &str) -> R<Db> {
-    state
-        .conns
-        .lock()
-        .await
-        .get(conn)
-        .cloned()
-        .ok_or_else(|| "connection นี้ยังไม่ได้เชื่อมต่อ".to_string())
+    if let Some(d) = state.conns.lock().await.get(conn).cloned() {
+        return Ok(d);
+    }
+    Err(match state.others.lock().await.get(conn) {
+        Some(o) => format!("{} ยังไม่รองรับคำสั่งนี้ (ตอนนี้ทำได้เฉพาะ Postgres / Redshift)", o.label()),
+        None => "connection นี้ยังไม่ได้เชื่อมต่อ".into(),
+    })
+}
+
+/// SQLite / MySQL — None = Postgres/Redshift หรือยังไม่ได้เชื่อมต่อ
+async fn other(state: &AppState, conn: &str) -> Option<other::Other> {
+    state.others.lock().await.get(conn).cloned()
 }
 
 async fn pool(state: &AppState, conn: &str) -> R<PgPool> {
@@ -178,11 +264,46 @@ fn split_name(q: &str) -> (String, String) {
 struct ConnInfo {
     version: String,
     engine: &'static str,
+    /// host key ของ SSH server (ต่อผ่าน tunnel) — UI จำไว้เทียบครั้งต่อไป
+    fingerprint: Option<String>,
+}
+
+/// ต่อผ่าน SSH ถ้ามี: เปิด tunnel แล้วคืน URL ที่ชี้มาที่ port ในเครื่องแทน
+async fn via(url: String, ssh: Option<tunnel::Ssh>) -> R<(String, Option<tunnel::Tunnel>)> {
+    match ssh {
+        Some(s) => {
+            let (u, t) = tunnel::through(&s, &url).await?;
+            Ok((u, Some(t)))
+        }
+        None => Ok((url, None)),
+    }
 }
 
 #[tauri::command]
-async fn connect(url: String, conn: String, readonly: Option<bool>,
+async fn connect(url: String, conn: String, readonly: Option<bool>, ssh: Option<tunnel::Ssh>,
     state: tauri::State<'_, AppState>) -> R<ConnInfo> {
+    let kind = other::kind(&url);
+    // SQLite เป็นไฟล์ในเครื่อง ไม่มีอะไรให้ต่อผ่าน SSH
+    let (url, tun) = via(url, ssh.filter(|_| !matches!(kind, Some(other::Kind::Lite)))).await?;
+    let fingerprint = tun.as_ref().map(|t| t.fingerprint.clone());
+    // tunnel เก็บเมื่อต่อ database สำเร็จเท่านั้น — พังกลางทางแล้ว drop = ปิด tunnel ทิ้ง
+    let keep = |tun: Option<tunnel::Tunnel>, conn: String| async {
+        let mut ts = state.tunnels.lock().await;
+        match tun {
+            Some(t) => ts.insert(conn, t),
+            None => ts.remove(&conn),
+        };
+    };
+    if let Some(kind) = kind {
+        let (o, version) = other::open(kind, &url, readonly.unwrap_or(false)).await?;
+        let engine = o.name();
+        keep(tun, conn.clone()).await;
+        state.conns.lock().await.remove(&conn);
+        if let Some(old) = state.others.lock().await.insert(conn, o) {
+            old.close().await;
+        }
+        return Ok(ConnInfo { version, engine, fingerprint });
+    }
     let p = pool_options(readonly.unwrap_or(false))
         .connect(&url)
         .await
@@ -192,10 +313,13 @@ async fn connect(url: String, conn: String, readonly: Option<bool>,
         .await
         .map_err(err)?;
     let engine = detect(&version);
+    keep(tun, conn.clone()).await;
+    state.others.lock().await.remove(&conn);
     state.conns.lock().await.insert(conn, Db { pool: p, engine });
     Ok(ConnInfo {
         version,
         engine: engine.name(),
+        fingerprint,
     })
 }
 
@@ -215,8 +339,17 @@ fn pool_options(ro: bool) -> PgPoolOptions {
 /// ลองต่อด้วย connection เดี่ยว ๆ แล้วปิดทิ้ง — ไม่แตะ pool ที่ใช้งานอยู่
 /// กด test ระหว่างที่ยังต่อ DB อื่นค้างอยู่จึงไม่ทำให้หลุด
 #[tauri::command]
-async fn test_connection(url: String) -> R<ConnInfo> {
+async fn test_connection(url: String, ssh: Option<tunnel::Ssh>) -> R<ConnInfo> {
     use sqlx::Connection;
+    let kind = other::kind(&url);
+    // tunnel อยู่แค่ตลอดการทดสอบ จบแล้ว drop ปิดเอง
+    let (url, tun) = via(url, ssh.filter(|_| !matches!(kind, Some(other::Kind::Lite)))).await?;
+    let fingerprint = tun.as_ref().map(|t| t.fingerprint.clone());
+    if let Some(kind) = kind {
+        let (o, version) = other::open(kind, &url, true).await?;
+        o.close().await;
+        return Ok(ConnInfo { version, engine: o.name(), fingerprint });
+    }
     let mut c = sqlx::PgConnection::connect(&url).await.map_err(err)?;
     let version: String = sqlx::query_scalar("select version()")
         .fetch_one(&mut c)
@@ -227,6 +360,7 @@ async fn test_connection(url: String) -> R<ConnInfo> {
     Ok(ConnInfo {
         version,
         engine: engine.name(),
+        fingerprint,
     })
 }
 
@@ -236,12 +370,19 @@ async fn disconnect(conn: String,
     if let Some(d) = state.conns.lock().await.remove(&conn) {
         d.pool.close().await;
     }
+    if let Some(o) = state.others.lock().await.remove(&conn) {
+        o.close().await;
+    }
+    state.tunnels.lock().await.remove(&conn);
     Ok(())
 }
 
 #[tauri::command]
 async fn list_tables(conn: String,
     state: tauri::State<'_, AppState>) -> R<Vec<TableInfo>> {
+    if let Some(o) = other(&state, &conn).await {
+        return o.list_tables().await;
+    }
     let p = pool(&state, &conn).await?;
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "select table_schema, table_name, table_type
@@ -270,6 +411,9 @@ async fn list_tables(conn: String,
 #[tauri::command]
 async fn list_all_columns(conn: String,
     state: tauri::State<'_, AppState>) -> R<Vec<(String, String, String, String)>> {
+    if let Some(o) = other(&state, &conn).await {
+        return o.list_all_columns().await;
+    }
     let p = pool(&state, &conn).await?;
     // type ไม่ได้ใช้กับ autocomplete แต่ส่งให้ AI รู้ว่าคอลัมน์ไหนเป็น bool/วันที่/ตัวเลข
     sqlx::query_as(
@@ -288,6 +432,9 @@ async fn list_all_columns(conn: String,
 #[tauri::command]
 async fn list_pk(table: String, conn: String,
     state: tauri::State<'_, AppState>) -> R<Vec<String>> {
+    if let Some(o) = other(&state, &conn).await {
+        return o.list_pk(&table).await;
+    }
     let d = db(&state, &conn).await?;
     if d.engine == Engine::Redshift {
         let (sch, tbl) = split_name(&table);
@@ -374,6 +521,9 @@ struct TableProps {
 #[tauri::command]
 async fn table_props(table: String, conn: String,
     state: tauri::State<'_, AppState>) -> R<TableProps> {
+    if let Some(o) = other(&state, &conn).await {
+        return o.table_props(&table).await;
+    }
     let d = db(&state, &conn).await?;
     if d.engine == Engine::Redshift {
         return redshift_props(&d.pool, &table).await;
@@ -559,6 +709,9 @@ struct Edge {
 /// FK ทุกเส้นใน database — ใช้วาด ER diagram
 #[tauri::command]
 async fn er_edges(conn: String, state: tauri::State<'_, AppState>) -> R<Vec<Edge>> {
+    if let Some(o) = other(&state, &conn).await {
+        return o.er_edges().await;
+    }
     let d = db(&state, &conn).await?;
     let p = d.pool;
     let rows: Vec<(String, String, String, String)> = if d.engine == Engine::Redshift {
@@ -610,16 +763,38 @@ async fn er_edges(conn: String, state: tauri::State<'_, AppState>) -> R<Vec<Edge
         .collect())
 }
 
+/// ชนิด SQL ตอนประกอบคำสั่ง — Postgres/Redshift/SQLite quote ชื่อด้วย " ส่วน MySQL ใช้ `
+/// และถือ \ ใน string เป็น escape (ไม่ escape ซ้ำ ค่าอย่าง C:\new จะกลายเป็นขึ้นบรรทัดใหม่)
+#[derive(Clone, Copy, PartialEq)]
+enum Dialect {
+    Std,
+    My,
+}
+
+fn ident_in(d: Dialect, s: &str) -> String {
+    match d {
+        Dialect::My => format!("`{}`", s.replace('`', "``")),
+        Dialect::Std => format!("\"{}\"", s.replace('"', "\"\"")),
+    }
+}
+
 fn ident(s: &str) -> String {
-    format!("\"{}\"", s.replace('"', "\"\""))
+    ident_in(Dialect::Std, s)
+}
+
+fn lit_in(d: Dialect, v: &Option<String>) -> String {
+    match v {
+        None => "NULL".into(),
+        // literal ไม่ระบุ type — ให้ database cast ตาม type ของคอลัมน์เอง
+        Some(s) => {
+            let s = s.replace('\'', "''");
+            format!("'{}'", if d == Dialect::My { s.replace('\\', "\\\\") } else { s })
+        }
+    }
 }
 
 fn lit(v: &Option<String>) -> String {
-    match v {
-        None => "NULL".into(),
-        // literal ไม่ระบุ type — ให้ Postgres cast ตาม type ของคอลัมน์เอง
-        Some(s) => format!("'{}'", s.replace('\'', "''")),
-    }
+    lit_in(Dialect::Std, v)
 }
 
 /// ค่าจริงในคอลัมน์ ไว้ป้อน autocomplete ตอนพิมพ์ `where col = '`
@@ -636,9 +811,12 @@ async fn column_values(
 ) -> R<Vec<String>> {
     if !table
         .chars()
-        .all(|c| c.is_alphanumeric() || "_$.\"".contains(c))
+        .all(|c| c.is_alphanumeric() || "_$.\"`".contains(c))
     {
         return Err("ชื่อตารางไม่ถูกต้อง".into());
+    }
+    if let Some(o) = other(&state, &conn).await {
+        return o.column_values(&table, &column, &prefix).await;
     }
     let d = db(&state, &conn).await?;
     let p = d.pool;
@@ -671,14 +849,18 @@ struct KeyVal {
     value: Option<String>,
 }
 
-fn where_keys(keys: &[KeyVal]) -> String {
+fn where_keys_in(d: Dialect, keys: &[KeyVal]) -> String {
     keys.iter()
         .map(|k| match &k.value {
-            None => format!("{} is null", ident(&k.column)),
-            v => format!("{} = {}", ident(&k.column), lit(v)),
+            None => format!("{} is null", ident_in(d, &k.column)),
+            v => format!("{} = {}", ident_in(d, &k.column), lit_in(d, v)),
         })
         .collect::<Vec<_>>()
         .join(" and ")
+}
+
+fn where_keys(keys: &[KeyVal]) -> String {
+    where_keys_in(Dialect::Std, keys)
 }
 
 /// เพิ่มแถวใหม่ — ส่งมาเฉพาะคอลัมน์ที่ผู้ใช้กรอกจริง
@@ -691,20 +873,32 @@ async fn insert_row(
     conn: String,
     state: tauri::State<'_, AppState>,
 ) -> R<Option<serde_json::Value>> {
+    if let Some(o) = other(&state, &conn).await {
+        return o.insert_one(&table, &values).await;
+    }
     insert_one(&db(&state, &conn).await?, &table, &values).await
 }
 
-fn insert_sql(table: &str, values: &[KeyVal]) -> String {
+fn insert_sql_in(d: Dialect, table: &str, values: &[KeyVal]) -> String {
     if values.is_empty() {
-        format!("insert into {} default values", table)
+        // MySQL ไม่มี DEFAULT VALUES
+        if d == Dialect::My {
+            format!("insert into {} () values ()", table)
+        } else {
+            format!("insert into {} default values", table)
+        }
     } else {
         format!(
             "insert into {} ({}) values ({})",
             table,
-            values.iter().map(|v| ident(&v.column)).collect::<Vec<_>>().join(", "),
-            values.iter().map(|v| lit(&v.value)).collect::<Vec<_>>().join(", ")
+            values.iter().map(|v| ident_in(d, &v.column)).collect::<Vec<_>>().join(", "),
+            values.iter().map(|v| lit_in(d, &v.value)).collect::<Vec<_>>().join(", ")
         )
     }
+}
+
+fn insert_sql(table: &str, values: &[KeyVal]) -> String {
+    insert_sql_in(Dialect::Std, table, values)
 }
 
 async fn insert_one(d: &Db, table: &str, values: &[KeyVal]) -> R<Option<serde_json::Value>> {
@@ -729,6 +923,9 @@ async fn insert_rows(
     conn: String,
     state: tauri::State<'_, AppState>,
 ) -> R<Vec<serde_json::Value>> {
+    if let Some(o) = other(&state, &conn).await {
+        return o.insert_many(&table, &rows).await;
+    }
     insert_many(&db(&state, &conn).await?, &table, &rows).await
 }
 
@@ -761,11 +958,16 @@ async fn delete_rows(
     conn: String,
     state: tauri::State<'_, AppState>,
 ) -> R<u64> {
+    let o = other(&state, &conn).await;
+    let dl = o.as_ref().map_or(Dialect::Std, |o| o.dialect());
     let sqls: Vec<String> = keys
         .iter()
-        .map(|k| format!("delete from {} where {}", table, where_keys(k)))
+        .map(|k| format!("delete from {} where {}", table, where_keys_in(dl, k)))
         .collect();
-    exact_one_each(&db(&state, &conn).await?, &sqls, "ลบ").await
+    match o {
+        Some(o) => o.exact_one_each(&sqls, "ลบ").await,
+        None => exact_one_each(&db(&state, &conn).await?, &sqls, "ลบ").await,
+    }
 }
 
 #[derive(Deserialize)]
@@ -783,19 +985,24 @@ async fn update_cells(
     conn: String,
     state: tauri::State<'_, AppState>,
 ) -> R<u64> {
+    let o = other(&state, &conn).await;
+    let dl = o.as_ref().map_or(Dialect::Std, |o| o.dialect());
     let sqls: Vec<String> = changes
         .iter()
         .map(|c| {
             format!(
                 "update {} set {} = {} where {}",
                 table,
-                ident(&c.column),
-                lit(&c.value),
-                where_keys(&c.keys)
+                ident_in(dl, &c.column),
+                lit_in(dl, &c.value),
+                where_keys_in(dl, &c.keys)
             )
         })
         .collect();
-    exact_one_each(&db(&state, &conn).await?, &sqls, "แก้").await
+    match o {
+        Some(o) => o.exact_one_each(&sqls, "แก้").await,
+        None => exact_one_each(&db(&state, &conn).await?, &sqls, "แก้").await,
+    }
 }
 
 async fn exact_one_each(d: &Db, sqls: &[String], verb: &str) -> R<u64> {
@@ -826,6 +1033,9 @@ async fn delete_row(
 ) -> R<Option<serde_json::Value>> {
     if keys.is_empty() {
         return Err("ตารางนี้ไม่มี primary key จึงลบแถวตรง ๆ ไม่ได้".into());
+    }
+    if let Some(o) = other(&state, &conn).await {
+        return o.delete_row(&table, &keys).await;
     }
     let p = pool(&state, &conn).await?;
     let where_sql = where_keys(&keys);
@@ -869,6 +1079,9 @@ async fn update_cell(
     if keys.is_empty() {
         return Err("ตารางนี้ไม่มี primary key จึงแก้ค่าตรง ๆ ไม่ได้".into());
     }
+    if let Some(o) = other(&state, &conn).await {
+        return o.update_cell(&table, &column, &value, &keys).await;
+    }
     let p = pool(&state, &conn).await?;
     let where_sql = where_keys(&keys);
     let sql = format!(
@@ -900,6 +1113,9 @@ async fn update_cell(
 #[tauri::command]
 async fn table_op(op: String, table: String, conn: String,
     state: tauri::State<'_, AppState>) -> R<u64> {
+    if let Some(o) = other(&state, &conn).await {
+        return o.table_op(&op, &table).await;
+    }
     let sql = op_sql(&op, &table)?;
     let p = pool(&state, &conn).await?;
     Ok(p.execute(sql.as_str()).await.map_err(err)?.rows_affected())
@@ -916,6 +1132,11 @@ fn op_sql(op: &str, table: &str) -> R<String> {
 }
 
 fn wrappable(sql: &str) -> bool {
+    // หลายคำสั่ง (มี ; ข้างใน) ห่อรวมเป็น subquery เดียวไม่ได้ — รันดิบแล้วแยกผลทีละคำสั่ง
+    // ; ที่อยู่ในข้อความก็แค่ไม่ห่อ (ไม่ตัดแถวฝั่ง server) ผลยังถูก
+    if sql.contains(';') {
+        return false;
+    }
     let head = sql
         .lines()
         .map(str::trim)
@@ -973,7 +1194,9 @@ fn row_json(row: &sqlx::postgres::PgRow) -> R<serde_json::Value> {
 #[tauri::command]
 async fn run_query(sql: String, conn: String,
     state: tauri::State<'_, AppState>) -> R<QueryResult> {
-    use futures_util::TryStreamExt;
+    if let Some(o) = other(&state, &conn).await {
+        return o.run_query(&sql).await;
+    }
 
     let p = pool(&state, &conn).await?;
     let t0 = Instant::now();
@@ -993,49 +1216,119 @@ async fn run_query(sql: String, conn: String,
         trimmed.clone()
     };
 
-    let mut columns: Vec<String> = Vec::new();
-    let mut rows: Vec<serde_json::Value> = Vec::new();
-    let mut affected: u64 = 0;
-    let mut seen: usize = 0;
+    let mut sets: Vec<ResultSet> = result_sets!(sqlx::raw_sql(&to_run).fetch_many(&p), cell_json);
 
-    let mut stream = sqlx::raw_sql(&to_run).fetch_many(&p);
-    while let Some(item) = stream.try_next().await.map_err(err)? {
-        match item {
-            sqlx::Either::Left(res) => affected += res.rows_affected(),
-            sqlx::Either::Right(row) => {
-                if columns.is_empty() {
-                    columns = row.columns().iter().map(|c| c.name().to_string()).collect();
-                    dedupe(&mut columns);
-                }
-                seen += 1;
-                if rows.len() < MAX_ROWS {
-                    let mut obj = serde_json::Map::with_capacity(columns.len());
-                    for (i, c) in columns.iter().enumerate() {
-                        obj.insert(c.clone(), cell_json(&row, i)?);
-                    }
-                    rows.push(serde_json::Value::Object(obj));
-                }
+    // ผลลัพธ์ว่างยังอยากรู้ชื่อคอลัมน์ — ถามจาก describe (พังก็ปล่อยผ่าน)
+    if capped && sets.len() <= 1 && sets.first().map_or(true, |s| s.columns.is_empty()) {
+        if let Ok(desc) = p.describe(&trimmed).await {
+            let mut columns: Vec<String> = desc.columns().iter().map(|c| c.name().to_string()).collect();
+            if !columns.is_empty() {
+                dedupe(&mut columns);
+                sets = vec![ResultSet { columns, ..Default::default() }];
             }
         }
     }
-    drop(stream);
+    Ok(into_result(sets, t0))
+}
 
-    // ผลลัพธ์ว่างยังอยากรู้ชื่อคอลัมน์ — ถามจาก describe (พังก็ปล่อยผ่าน)
-    if columns.is_empty() && capped {
-        if let Ok(desc) = p.describe(&trimmed).await {
-            columns = desc.columns().iter().map(|c| c.name().to_string()).collect();
-            dedupe(&mut columns);
-        }
+/// แผนการรัน query — format บอกฝั่ง UI ว่าวาดแบบไหน
+/// pg = JSON ของ Postgres, sqlite = แถวของ EXPLAIN QUERY PLAN เป็น JSON, text = ข้อความดิบ
+#[derive(Serialize)]
+struct Explained {
+    format: &'static str,
+    text: String,
+}
+
+/// analyze = รันจริงเพื่อได้เวลา/จำนวนแถวจริง — อยู่ใน transaction แล้ว rollback เสมอ
+/// (คำสั่งที่แก้ข้อมูลจึงไม่ค้าง ยกเว้นของที่ rollback ไม่ได้อย่าง sequence)
+#[tauri::command]
+async fn explain(sql: String, analyze: bool, conn: String,
+    state: tauri::State<'_, AppState>) -> R<Explained> {
+    let q = sql.trim().trim_end_matches(';').trim().to_string();
+    if q.is_empty() {
+        return Err("ไม่มี SQL ให้ explain".into());
     }
+    if q.contains(';') {
+        return Err("Explain ได้ทีละคำสั่ง — วางเคอร์เซอร์ไว้ที่คำสั่งเดียว".into());
+    }
+    if let Some(o) = other(&state, &conn).await {
+        return o.explain(&q, analyze).await;
+    }
+    let d = db(&state, &conn).await?;
+    let mut tx = d.pool.begin().await.map_err(err)?;
+    let out = if d.engine == Engine::Redshift {
+        // Redshift ไม่มี FORMAT JSON / ANALYZE — ได้เป็นข้อความทีละบรรทัด
+        let rows = (&mut *tx).fetch_all(format!("explain {}", q).as_str()).await.map_err(err);
+        rows.and_then(|rows| {
+            Ok(Explained {
+                format: "text",
+                text: rows.iter().map(|r| cell_json(r, 0).map(|v| cell_text(&v))).collect::<R<Vec<_>>>()?.join("\n"),
+            })
+        })
+    } else {
+        let opts = if analyze { "format json, analyze, buffers" } else { "format json" };
+        (&mut *tx)
+            .fetch_one(format!("explain ({}) {}", opts, q).as_str())
+            .await
+            .map_err(err)
+            .and_then(|r| Ok(Explained { format: "pg", text: cell_text(&cell_json(&r, 0)?) }))
+    };
+    tx.rollback().await.ok();
+    out
+}
 
-    Ok(QueryResult {
-        truncated: seen > MAX_ROWS,
-        affected: if columns.is_empty() { affected } else { seen as u64 },
-        columns,
-        rows,
-        elapsed_ms: t0.elapsed().as_millis(),
-        deleted: None,
-    })
+/// session ที่ต่อ database นี้อยู่ — ทุกชนิดคืนคีย์ชุดเดียวกัน:
+/// pid, usr, db, client, state, wait, secs (รันมากี่วินาที), query, blocked_by (pid ที่ขวางอยู่ คั่นด้วย ,)
+const PG_SESSIONS: &str = "select a.pid, coalesce(a.usename, '') usr, coalesce(a.datname, '') db,
+        coalesce(host(a.client_addr), '') || case when a.application_name <> '' then ' · ' || a.application_name else '' end client,
+        coalesce(a.state, '') state, coalesce(a.wait_event_type || ': ' || a.wait_event, '') wait,
+        round(extract(epoch from now() - coalesce(a.query_start, a.backend_start))::numeric, 1) secs,
+        coalesce(a.query, '') query, array_to_string(pg_blocking_pids(a.pid), ',') blocked_by
+ from pg_stat_activity a
+ where a.backend_type = 'client backend' and a.pid <> pg_backend_pid()
+ order by a.state = 'active' desc, secs desc";
+
+/// Redshift: เห็นเฉพาะที่กำลังรัน (stv_recents) — ไม่มีข้อมูลว่าใครขวางใคร
+const RS_SESSIONS: &str = "select pid, trim(user_name) usr, trim(db_name) db, '' client, trim(status) state, '' wait,
+        round(duration / 1000000.0, 1) secs, trim(query) query, '' blocked_by
+ from stv_recents where status = 'Running' and pid <> pg_backend_pid() order by duration desc";
+
+async fn pg_sessions(p: &PgPool, engine: Engine) -> R<Vec<serde_json::Value>> {
+    let rows = p
+        .fetch_all(if engine == Engine::Redshift { RS_SESSIONS } else { PG_SESSIONS })
+        .await
+        .map_err(err)?;
+    rows.iter().map(row_json).collect()
+}
+
+#[tauri::command]
+async fn sessions(conn: String, state: tauri::State<'_, AppState>) -> R<Vec<serde_json::Value>> {
+    if let Some(o) = other(&state, &conn).await {
+        return o.sessions().await;
+    }
+    let d = db(&state, &conn).await?;
+    pg_sessions(&d.pool, d.engine).await
+}
+
+/// terminate = ตัด session ทิ้งทั้งอัน (transaction ที่ค้างถูก rollback), ไม่งั้นแค่ยกเลิก query ที่รันอยู่
+#[tauri::command]
+async fn kill_session(conn: String, pid: i64, terminate: bool,
+    state: tauri::State<'_, AppState>) -> R<bool> {
+    if let Some(o) = other(&state, &conn).await {
+        return o.kill(pid, terminate).await;
+    }
+    let d = db(&state, &conn).await?;
+    if d.engine == Engine::Redshift && !terminate {
+        d.pool.execute(format!("cancel {}", pid).as_str()).await.map_err(err)?;
+        return Ok(true);
+    }
+    let f = if terminate { "pg_terminate_backend" } else { "pg_cancel_backend" };
+    let (ok,): (bool,) = sqlx::query_as(&format!("select {}($1)", f))
+        .bind(pid as i32)
+        .fetch_one(&d.pool)
+        .await
+        .map_err(err)?;
+    Ok(ok)
 }
 
 /// `select * from a join b` ให้ชื่อคอลัมน์ซ้ำได้ ซึ่งพังสองชั้น: key ใน JSON ของแถว
@@ -1667,6 +1960,9 @@ async fn backup_database(path: String, conn: String,
 #[tauri::command]
 async fn import_sql(path: String, conn: String,
     state: tauri::State<'_, AppState>) -> R<u64> {
+    if let Some(o) = other(&state, &conn).await {
+        return o.run_script(std::fs::read_to_string(&path).map_err(err)?.trim_start_matches('\u{feff}')).await;
+    }
     let p = pool(&state, &conn).await?;
     let text = std::fs::read_to_string(&path).map_err(err)?;
     // ครอบ BEGIN/COMMIT ในตัว SQL เอง: ถ้ามี statement ไหนพัง Postgres จะ abort ทั้ง
@@ -1697,8 +1993,13 @@ pub fn run() {
         .manage(ai::Ai::default())
         .manage(AppState {
             conns: Mutex::new(HashMap::new()),
+            others: Mutex::new(HashMap::new()),
+            tunnels: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
+            sessions,
+            kill_session,
+            explain,
             export_xlsx,
             read_text,
             secret_get,
@@ -1922,6 +2223,86 @@ mod tests {
         secret_set(id.clone(), "".into()).unwrap();
         assert_eq!(secret_get(id.clone()).unwrap(), None);
         secret_set(id, "".into()).unwrap(); // ลบซ้ำไม่ error
+    }
+
+    /// รันหลายคำสั่งใน Postgres จริง: ได้ผลแยกทีละคำสั่ง ตัวหลักคือ select ตัวสุดท้าย
+    #[tokio::test]
+    #[ignore]
+    async fn pg_multi_result_sets() -> R<()> {
+        let base = std::env::var("MARKDB_TEST_PG").expect("ตั้ง MARKDB_TEST_PG ก่อน");
+        let p = PgPool::connect(&format!("{}/postgres", base)).await.unwrap();
+        let sets: Vec<ResultSet> = result_sets!(
+            sqlx::raw_sql("select 1 as a; create temp table mdb_x (i int); insert into mdb_x values (1), (2); select i, 'ข' t from mdb_x order by i")
+                .fetch_many(&p),
+            cell_json
+        );
+        assert_eq!(sets.len(), 4);
+        assert_eq!(sets[0].rows, [json!({"a": 1})]);
+        assert_eq!(sets[2].affected, 2);
+        let r = into_result(sets, Instant::now());
+        assert_eq!(r.columns, ["i", "t"]);
+        assert_eq!(r.rows[1], json!({"i": 2, "t": "ข"}));
+        assert_eq!(r.sets.len(), 4);
+        Ok(())
+    }
+
+    /// explain ใน Postgres จริง: ได้ JSON และ analyze ของ DELETE ไม่ลบจริง
+    #[tokio::test]
+    #[ignore]
+    async fn pg_explain_rolls_back() {
+        let base = std::env::var("MARKDB_TEST_PG").expect("ตั้ง MARKDB_TEST_PG ก่อน");
+        let p = PgPool::connect(&format!("{}/postgres", base)).await.unwrap();
+        p.execute("drop table if exists mdb_ex; create table mdb_ex (id int primary key); insert into mdb_ex select generate_series(1, 50)")
+            .await
+            .unwrap();
+        let mut tx = p.begin().await.unwrap();
+        let r = (&mut *tx).fetch_one("explain (format json, analyze, buffers) delete from mdb_ex").await.unwrap();
+        tx.rollback().await.unwrap();
+        let plan: serde_json::Value = serde_json::from_str(&cell_text(&cell_json(&r, 0).unwrap())).unwrap();
+        assert_eq!(plan[0]["Plan"]["Node Type"], "ModifyTable");
+        assert!(plan[0]["Execution Time"].is_number());
+        let (n,): (i64,) = sqlx::query_as("select count(*) from mdb_ex").fetch_one(&p).await.unwrap();
+        assert_eq!(n, 50);
+        p.execute("drop table mdb_ex").await.unwrap();
+    }
+
+    /// session ใน Postgres จริง: เห็นคนที่โดน lock ขวาง และ kill ตัวที่ขวางแล้วอีกฝั่งไปต่อได้
+    #[tokio::test]
+    #[ignore]
+    async fn pg_sessions_show_blocking() {
+        let base = std::env::var("MARKDB_TEST_PG").expect("ตั้ง MARKDB_TEST_PG ก่อน");
+        let url = format!("{}/postgres", base);
+        let admin = PgPool::connect(&url).await.unwrap();
+        admin.execute("drop table if exists mdb_lock; create table mdb_lock (id int primary key, v int); insert into mdb_lock values (1, 0)")
+            .await
+            .unwrap();
+        // ตัวขวาง: ถือ lock แถว 1 ไว้ใน transaction ที่ยังไม่ commit
+        let holder = PgPool::connect(&url).await.unwrap();
+        let mut tx = holder.begin().await.unwrap();
+        (&mut *tx).execute("update mdb_lock set v = 1 where id = 1").await.unwrap();
+        let (holder_pid,): (i32,) = sqlx::query_as("select pg_backend_pid()").fetch_one(&mut *tx).await.unwrap();
+        // ตัวที่รอ
+        let waiter = PgPool::connect(&url).await.unwrap();
+        let wait = tokio::spawn(async move { waiter.execute("update mdb_lock set v = 2 where id = 1").await.map(|r| r.rows_affected()) });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let rows = pg_sessions(&admin, Engine::Postgres).await.unwrap();
+        let blocked: Vec<&serde_json::Value> = rows.iter().filter(|r| r["blocked_by"] != "").collect();
+        assert_eq!(blocked.len(), 1, "{:?}", rows);
+        assert_eq!(blocked[0]["blocked_by"], holder_pid.to_string());
+        assert!(blocked[0]["query"].as_str().unwrap().contains("set v = 2"));
+
+        let (ok,): (bool,) = sqlx::query_as("select pg_terminate_backend($1)").bind(holder_pid).fetch_one(&admin).await.unwrap();
+        assert!(ok);
+        assert_eq!(wait.await.unwrap().unwrap(), 1);
+        drop(tx);
+        admin.execute("drop table mdb_lock").await.unwrap();
+    }
+
+    #[test]
+    fn several_statements_are_not_wrapped() {
+        assert!(wrappable("select 1"));
+        assert!(!wrappable("select 1; select 2"));
     }
 
     #[test]

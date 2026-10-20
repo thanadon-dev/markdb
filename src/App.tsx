@@ -14,6 +14,10 @@ import * as qh from "./queries";
 import { grouped, renameGroup } from "./groups";
 import { fromUrl } from "./connurl";
 import { fromFile, toFile } from "./connfile";
+import { formatSql } from "./format";
+import { ExplainView, type Plan } from "./ExplainView";
+import { SessionsView } from "./SessionsView";
+import { ChartView } from "./ChartView";
 import * as hist from "./history";
 import { PostgreSQL, sql as sqlLang } from "@codemirror/lang-sql";
 import { createTheme } from "@uiw/codemirror-themes";
@@ -76,6 +80,9 @@ import {
   Spinner,
   Table as TableIcon,
   Star,
+  ChartBar,
+  Pulse,
+  TextAlignLeft,
   Sun,
   Moon,
   Monitor,
@@ -90,7 +97,8 @@ import {
 } from "@phosphor-icons/react";
 import "./styles.css";
 
-type TableInfo = { schema: string; name: string; kind: string };
+/** q = ชื่อเต็มที่ quote ตามชนิด database แล้ว (ใส่ตอนโหลดรายการตาราง) */
+type TableInfo = { schema: string; name: string; kind: string; q?: string };
 type QueryResult = {
   columns: string[];
   rows: Record<string, unknown>[];
@@ -99,9 +107,16 @@ type QueryResult = {
   truncated: boolean;
   /** DELETE ที่พิมพ์จาก editor — แถวที่ถูกลบ (ว่าง + partial = เยอะเกินเก็บ) */
   deleted?: { table: string; rows: Record<string, unknown>[]; partial: boolean } | null;
+  /** รันหลายคำสั่งพร้อมกัน: ผลทุกคำสั่งตามลำดับ (คำสั่งเดียว = ว่าง) */
+  sets?: ResultSet[];
 };
+type ResultSet = Pick<QueryResult, "columns" | "rows" | "affected" | "truncated">;
 type Tab = {
   id: string;
+  /** ชุดผลลัพธ์ที่เลือกดูอยู่ (ตอนรันหลายคำสั่ง) */
+  setIdx?: number;
+  /** แผนการรันที่เปิดดูอยู่ — รัน query ปกติแล้วปิดเอง */
+  plan?: Plan;
   conn: string;
   title: string;
   sql: string;
@@ -159,8 +174,28 @@ type Release = { tag_name: string; name: string; published_at: string; body: str
 
 const RELEASES_API = "https://api.github.com/repos/thanadon-dev/markdb/releases?per_page=20";
 
-type Engine = "postgres" | "redshift";
-type ConnInfo = { version: string; engine: Engine };
+type Engine = "postgres" | "redshift" | "sqlite" | "mysql";
+const ENGINES: { id: Engine; name: string }[] = [
+  { id: "postgres", name: "PostgreSQL" },
+  { id: "redshift", name: "Amazon Redshift" },
+  { id: "mysql", name: "MySQL / MariaDB" },
+  { id: "sqlite", name: "SQLite" },
+];
+/** backup / import CSV / sync ยังทำได้เฉพาะสองตัวนี้ */
+const pgLike = (e?: Engine) => !e || e === "postgres" || e === "redshift";
+type ConnInfo = { version: string; engine: Engine; fingerprint?: string | null };
+
+/** ต่อ database ผ่าน SSH (bastion / jump host) — password / passphrase อยู่ใน sshPass (เก็บใน Credential Manager) */
+type SshCfg = {
+  on: boolean;
+  host: string;
+  port: string;
+  user: string;
+  auth: "password" | "key";
+  keyPath?: string;
+  /** host key ที่จำไว้ตั้งแต่ต่อครั้งแรก — ไม่ตรง = ปฏิเสธ (กันโดนดักกลางทาง) */
+  fingerprint?: string;
+};
 
 type Conn = {
   id: string;
@@ -179,7 +214,23 @@ type Conn = {
   readonly?: boolean;
   /** กลุ่มในแถบซ้าย — ว่าง = จัดกลุ่มตาม host อัตโนมัติ */
   group?: string;
+  ssh?: SshCfg;
+  sshPass?: string;
 };
+
+/** ค่า ssh ที่ส่งให้ backend — ปิดอยู่ / SQLite = null */
+const sshArg = (c: Conn) =>
+  c.ssh?.on && c.engine !== "sqlite"
+    ? {
+        host: c.ssh.host,
+        port: Number(c.ssh.port) || 22,
+        user: c.ssh.user,
+        password: c.ssh.auth === "password" ? c.sshPass ?? "" : null,
+        key_path: c.ssh.auth === "key" ? c.ssh.keyPath ?? "" : null,
+        key_pass: c.ssh.auth === "key" ? c.sshPass || null : null,
+        fingerprint: c.ssh.fingerprint || null,
+      }
+    : null;
 
 const CONNS_KEY = "markdb.conns";
 const TABS_KEY = "markdb.tabs";
@@ -190,7 +241,7 @@ const PAGE = 15;
 /* แบ่งหน้า/order by ได้เฉพาะ SELECT — explain/show ต่อ limit ท้ายไม่ได้ */
 const isSelect = (sql: string) => /^\s*(?:--[^\n]*\n\s*)*(select|with|table|values)\b/i.test(sql);
 const ROW_H = 28;
-const PORTS: Record<Engine, string> = { postgres: "5432", redshift: "5439" };
+const PORTS: Record<Engine, string> = { postgres: "5432", redshift: "5439", mysql: "3306", sqlite: "" };
 
 const BLANK: Conn = {
   id: "",
@@ -237,13 +288,39 @@ const RsLogo = ({ size = 16 }: { size?: number }) => (
   </svg>
 );
 
+/* SQLite = ไฟล์ database สีฟ้า, MySQL = ถังข้อมูลฟ้าเข้มคาดส้ม — รูปทรงทั่วไป ไม่ใช่โลโก้แบรนด์ */
+const LiteLogo = ({ size = 16 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden>
+    <path d="M6 2.5h8.5L19 7v14.5H6Z" fill="#0f80cc" />
+    <path d="M14.5 2.5V7H19Z" fill="#7cc4f2" />
+    <ellipse cx="12.5" cy="12" rx="3.6" ry="1.4" fill="#fff" opacity=".9" />
+    <path d="M8.9 12v4.6c0 .8 1.6 1.4 3.6 1.4s3.6-.6 3.6-1.4V12" fill="none" stroke="#fff" strokeWidth="1.2" opacity=".9" />
+  </svg>
+);
+
+const MyLogo = ({ size = 16 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden>
+    <ellipse cx="12" cy="5.5" rx="7.5" ry="2.8" fill="#00758f" />
+    <path d="M4.5 5.5v13c0 1.6 3.4 2.8 7.5 2.8s7.5-1.2 7.5-2.8v-13c0 1.6-3.4 2.8-7.5 2.8S4.5 7.1 4.5 5.5Z" fill="#00758f" />
+    <path d="M4.5 11.5c0 1.6 3.4 2.8 7.5 2.8s7.5-1.2 7.5-2.8" fill="none" stroke="#f29111" strokeWidth="1.6" />
+  </svg>
+);
+
 const EngineLogo = ({ engine, size }: { engine: Engine; size?: number }) =>
-  engine === "redshift" ? <RsLogo size={size} /> : <PgLogo size={size} />;
+  engine === "redshift" ? (
+    <RsLogo size={size} />
+  ) : engine === "sqlite" ? (
+    <LiteLogo size={size} />
+  ) : engine === "mysql" ? (
+    <MyLogo size={size} />
+  ) : (
+    <PgLogo size={size} />
+  );
 
 const mb = (n: number) => (n / 1_048_576).toFixed(1);
 
 const uid = () => Math.random().toString(36).slice(2, 9);
-const qname = (t: TableInfo) => `"${t.schema}"."${t.name}"`;
+const qname = (t: TableInfo) => t.q ?? `${quoteIdent(t.schema)}.${quoteIdent(t.name)}`;
 
 const Close = ({ on }: { on: () => void }) => (
   <button className="modal-x" onClick={on} title="ปิด (Esc)">
@@ -284,12 +361,16 @@ const HoldButton = ({ onClick, children, ms = 3000 }: { onClick: () => void; chi
 
 const connUrl = (c: Conn) => {
   if (c.url) return c.url;
+  // SQLite: ช่อง Database เก็บ path ของไฟล์
+  if (c.engine === "sqlite") return `sqlite:${c.db}`;
   const auth = c.pass
     ? `${encodeURIComponent(c.user)}:${encodeURIComponent(c.pass)}@`
     : c.user
       ? `${encodeURIComponent(c.user)}@`
       : "";
   const port = c.port || PORTS[c.engine ?? "postgres"];
+  if (c.engine === "mysql")
+    return `mysql://${auth}${c.host}:${port}/${encodeURIComponent(c.db)}${c.ssl ? "?ssl-mode=REQUIRED" : ""}`;
   // Redshift ปิดการต่อแบบไม่เข้ารหัสไว้ที่ cluster อยู่แล้ว — บังคับ sslmode ให้เลย
   const ssl = c.ssl || c.engine === "redshift";
   return `postgres://${auth}${c.host}:${port}/${encodeURIComponent(c.db)}${
@@ -297,11 +378,17 @@ const connUrl = (c: Conn) => {
   }`;
 };
 
+/** ช่องลับใน connection → id ใน Credential Manager (password database = id, password / passphrase SSH = id:ssh) */
+const SECRETS = [
+  ["pass", ""],
+  ["sshPass", ":ssh"],
+] as const;
+
 /* URL ที่วางไว้ในช่อง Host → แตกเป็นช่อง ไม่งั้น Database / Port / User ที่แก้ทีหลังไม่มีผล
    (เคยทำให้ host เดียวกันคนละ database ไปต่อ database เดิม) — แตกไม่ได้ก็ใช้ URL ตรง ๆ แบบเดิม */
 const splitUrl = (c: Conn): Conn => {
   const p = c.url ? fromUrl(c.url) : null;
-  return p ? { ...c, ...p, port: p.port || PORTS[c.engine ?? "postgres"], url: undefined } : c;
+  return p ? { ...c, ...p, port: p.port || PORTS[p.engine ?? c.engine ?? "postgres"], url: undefined } : c;
 };
 
 const loadConns = (): Conn[] => {
@@ -369,10 +456,15 @@ const loadAi = (): AiPrefs => {
   }
 };
 
+const AI_TARGET: Record<Engine, string> = {
+  postgres: "PostgreSQL",
+  redshift: "Amazon Redshift (no recursive CTE inside a subquery, no json_agg)",
+  mysql: "MySQL / MariaDB (quote identifiers with backticks, not double quotes)",
+  sqlite: "SQLite (no ILIKE, no ::casts; use CAST(x AS TEXT))",
+};
+
 const aiSystem = (engine: Engine) =>
-  `You write SQL for MarkDB, a desktop database client. Target database: ${
-    engine === "redshift" ? "Amazon Redshift (no recursive CTE inside a subquery, no json_agg)" : "PostgreSQL"
-  }.
+  `You write SQL for MarkDB, a desktop database client. Target database: ${AI_TARGET[engine]}.
 Your reply is typed straight into the SQL editor, so reply with SQL only: no markdown fences, no prose outside SQL comments.
 Start with one short "--" comment saying what the query does, written in the same language as the request. Add brief inline "--" comments only where a join or filter is not obvious.
 Use only tables and columns from the schema. Double-quote identifiers that contain uppercase letters or special characters.
@@ -1253,6 +1345,7 @@ const Grid = memo(function Grid({
   onExportJson,
   onOrder,
   serverOrder,
+  dialect,
   newCols,
   onInsert,
   onFilter,
@@ -1271,6 +1364,8 @@ const Grid = memo(function Grid({
   onOrder?: (col: string, dir: "asc" | "desc" | null) => void;
   /** order by ที่อยู่ใน SQL ตอนนี้ ไว้โชว์ลูกศรที่หัวคอลัมน์ */
   serverOrder?: string | null;
+  /** ชนิด database ของแท็บ — quote ชื่อคอลัมน์ให้ตรงกับที่ order by ใส่ไว้ */
+  dialect?: Engine;
   /** คอลัมน์ของตารางเป้าหมาย (type/default) — มี = โชว์แถวใหม่จาง ๆ ท้ายตารางให้พิมพ์เพิ่มแถวได้ */
   newCols?: ColumnInfo[];
   /** insert แถวใหม่ — ค่าว่าง = ไม่ส่ง ให้ DB ใส่ DEFAULT, "NULL" = null; throw = error ไปโชว์ที่แถว */
@@ -1901,7 +1996,7 @@ Tab = เติมค่าที่แนะนำ · Enter = บันทึ�
       <div className="grid-head" style={{ gridTemplateColumns: template }}>
         {cols.map((c) => {
           const srv =
-            serverOrder === `${quoteIdent(c)} asc` ? "▲" : serverOrder === `${quoteIdent(c)} desc` ? "▼" : "";
+            serverOrder === `${quoteIdent(c, dialect)} asc` ? "▲" : serverOrder === `${quoteIdent(c, dialect)} desc` ? "▼" : "";
           return (
             <div
               key={c}
@@ -2239,9 +2334,11 @@ export default function App() {
   // ประวัติ SQL ที่รัน
   const [ranLog, setRanLog] = useState<qh.Ran[]>(qh.load);
   const [qOpen, setQOpen] = useState(false);
+  // หน้าต่าง session — เก็บ id ของ connection ที่เปิดดู
+  const [sessConn, setSessConn] = useState("");
   const [qSearch, setQSearch] = useState("");
   const [qClear, setQClear] = useState(false);
-  const [mode, setMode] = useState<"grid" | "record">("grid");
+  const [mode, setMode] = useState<"grid" | "record" | "chart">("grid");
   const [selRows, setSelRows] = useState<number[]>([]);
   const [confirmDel, setConfirmDel] = useState<Record<string, unknown> | null>(null);
   const [stage, setStage] = useState("");
@@ -2287,14 +2384,17 @@ export default function App() {
 
   /* ตารางเป้าหมายอ่านจากตัว query เอง ไม่ผูกกับว่าเปิดแท็บมาแบบไหน — พิมพ์
      select เองในแท็บใหม่ก็แก้ค่าได้ และพอแก้ query ไปชี้ตารางอื่นมันก็ตามไปเอง */
+  const tabDialect = conns.find((c) => c.id === tabConn)?.engine;
   const target = useMemo(() => {
     const t = targetTable(tab?.sql ?? "");
     if (!t) return "";
-    if (t.schema) return `"${t.schema}"."${t.name}"`;
-    // ไม่ได้ระบุ schema — หาจากรายชื่อตารางจริงก่อน ค่อย fallback เป็น public
+    const q = (x: string) => quoteIdent(x, tabDialect);
+    if (t.schema) return `${q(t.schema)}.${q(t.name)}`;
+    // ไม่ได้ระบุ schema — หาจากรายชื่อตารางจริงก่อน ค่อย fallback เป็นตัวตั้งต้นของแต่ละชนิด
     const hit = (live[tabConn]?.tables ?? []).filter((x) => x.name === t.name);
-    return hit.length === 1 ? `"${hit[0].schema}"."${t.name}"` : `"public"."${t.name}"`;
-  }, [tab?.sql, live, tabConn]);
+    if (hit.length === 1) return qname(hit[0]);
+    return tabDialect === "mysql" ? q(t.name) : `${q(tabDialect === "sqlite" ? "main" : "public")}.${q(t.name)}`;
+  }, [tab?.sql, live, tabConn, tabDialect]);
 
   const keyId = target ? `${tabConn}::${target}` : "";
   const rowKey = keyId ? keys[keyId] : null;
@@ -2315,6 +2415,7 @@ export default function App() {
   const tabInfo = conns.find((c) => c.id === tabConn);
   const ro = !!tabInfo?.readonly;
   const activeRo = !!conns.find((c) => c.id === activeConn)?.readonly;
+  const activeEngine = conns.find((c) => c.id === activeConn)?.engine;
   const editable = !!(tab?.res?.columns.length && rowKey?.length && !missingKeys.length && !ro);
 
   useEffect(() => {
@@ -2362,32 +2463,48 @@ export default function App() {
   connsRef.current = conns;
   const writeConns = useCallback(() => {
     const v = vault.current;
-    localStorage.setItem(CONNS_KEY, JSON.stringify(connsRef.current.map((c) => (v?.[c.id] === c.pass ? { ...c, pass: "" } : c))));
+    localStorage.setItem(
+      CONNS_KEY,
+      JSON.stringify(
+        connsRef.current.map((c) => {
+          const out = { ...c };
+          for (const [f, sfx] of SECRETS) if (v?.[c.id + sfx] === (c[f] ?? "")) out[f] = "";
+          return out;
+        }),
+      ),
+    );
   }, []);
   useEffect(() => {
     (async () => {
       const got: Record<string, string> = {};
       await Promise.all(
-        connsRef.current
-          .filter((c) => !c.pass)
-          .map(async (c) => {
-            const p = await invoke<string | null>("secret_get", { id: c.id }).catch(() => null);
-            got[c.id] = p ?? "";
+        connsRef.current.flatMap((c) =>
+          SECRETS.filter(([f]) => !c[f]).map(async ([, sfx]) => {
+            const p = await invoke<string | null>("secret_get", { id: c.id + sfx }).catch(() => null);
+            got[c.id + sfx] = p ?? "";
           }),
+        ),
       );
       vault.current = got;
-      setConns((cs) => cs.map((c) => (!c.pass && got[c.id] ? { ...c, pass: got[c.id] } : c)));
+      setConns((cs) =>
+        cs.map((c) => {
+          const out = { ...c };
+          for (const [f, sfx] of SECRETS) if (!c[f] && got[c.id + sfx]) out[f] = got[c.id + sfx];
+          return out;
+        }),
+      );
     })();
   }, []);
   useEffect(() => {
     writeConns();
     const v = vault.current;
     if (!v) return;
-    const changed = conns.filter((c) => v[c.id] !== c.pass);
-    const gone = Object.keys(v).filter((id) => !conns.some((c) => c.id === id));
+    const want = new Map(conns.flatMap((c) => SECRETS.map(([f, sfx]) => [c.id + sfx, c[f] ?? ""] as const)));
+    const changed = [...want].filter(([k, val]) => v[k] !== val);
+    const gone = Object.keys(v).filter((k) => !want.has(k));
     if (!changed.length && !gone.length) return;
     Promise.all([
-      ...changed.map((c) => invoke("secret_set", { id: c.id, pass: c.pass }).then(() => void (v[c.id] = c.pass))),
+      ...changed.map(([id, pass]) => invoke("secret_set", { id, pass }).then(() => void (v[id] = pass))),
       ...gone.map((id) => invoke("secret_set", { id, pass: "" }).then(() => void delete v[id])),
     ])
       .catch((e) => setToast(`เก็บ password ใน Credential Manager ไม่ได้ — ยังเก็บไว้ในเครื่องแบบเดิม: ${e}`))
@@ -2418,6 +2535,7 @@ export default function App() {
     const onEsc = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       if (guard) return setGuard(null);
+      if (sessConn) return setSessConn("");
       if (qOpen) return setQOpen(false);
       if (toolsOpen) return setToolsOpen(false);
       if (tblMenu) return setTblMenu(null);
@@ -2436,7 +2554,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
-  }, [guard, qOpen, toolsOpen, tblMenu, logOpen, danger, addRow, confirmDel, restoreFile, csvJob, syncOpen, busy, props, exportOpen, erOpen, form, updatesOpen, pct]);
+  }, [guard, sessConn, qOpen, toolsOpen, tblMenu, logOpen, danger, addRow, confirmDel, restoreFile, csvJob, syncOpen, busy, props, exportOpen, erOpen, form, updatesOpen, pct]);
 
   useEffect(() => hist.save(log), [log]);
   useEffect(() => qh.save(ranLog), [ranLog]);
@@ -2456,7 +2574,11 @@ export default function App() {
       invoke<TableInfo[]>("list_tables", { conn: id }),
       invoke<[string, string, string, string][]>("list_all_columns", { conn: id }),
     ]);
-    const tbls = t.status === "fulfilled" ? t.value : [];
+    const dl = connsRef.current.find((x) => x.id === id)?.engine;
+    const tbls = (t.status === "fulfilled" ? t.value : []).map((x) => ({
+      ...x,
+      q: `${quoteIdent(x.schema, dl)}.${quoteIdent(x.name, dl)}`,
+    }));
     const cols = c.status === "fulfilled" ? c.value : [];
     const map: Record<string, string[]> = {};
     for (const [s, t, c] of cols) {
@@ -2484,7 +2606,10 @@ export default function App() {
       const fail = (m: string) => setConnErr((x) => ({ ...x, [c.id]: m }));
       setConnErr(({ [c.id]: _, ...rest }) => rest);
       try {
-        const info = await invoke<ConnInfo>("connect", { conn: c.id, url: connUrl(c), readonly: !!c.readonly });
+        const info = await invoke<ConnInfo>("connect", { conn: c.id, url: connUrl(c), readonly: !!c.readonly, ssh: sshArg(c) });
+        // ต่อผ่าน SSH ครั้งแรก: จำ host key ไว้ ครั้งต่อไปไม่ตรงจะถูกปฏิเสธ
+        if (info.fingerprint && c.ssh && !c.ssh.fingerprint)
+          setConns((cs) => cs.map((x) => (x.id === c.id && x.ssh ? { ...x, ssh: { ...x.ssh, fingerprint: info.fingerprint! } } : x)));
         setActiveConn(c.id);
         try {
           await loadMeta(c.id);
@@ -2541,10 +2666,10 @@ export default function App() {
       const logRan = (x: Partial<qh.Ran>) =>
         opt.log &&
         setRanLog((l) => qh.add(l, { id: uid(), at, conn: c, connName: info?.name ?? "", sql: sqlText.trim(), ...x }));
-      patch(id, { running: true, err: undefined });
+      patch(id, { running: true, err: undefined, plan: undefined });
       try {
         const res = await invoke<QueryResult>("run_query", { conn: c, sql: sqlText });
-        patch(id, { res, running: false, ran: sqlText.trim(), ranAt: Date.now(), failed: undefined });
+        patch(id, { res, running: false, ran: sqlText.trim(), ranAt: Date.now(), failed: undefined, setIdx: undefined });
         logRan({ ms: res.elapsed_ms, rows: res.columns.length ? res.rows.length : res.affected });
         // DELETE ที่พิมพ์เอง: เก็บแถวที่ถูกลบลงประวัติ ย้อนกลับได้เหมือนลบจากตาราง
         const d = res.deleted;
@@ -2622,13 +2747,14 @@ export default function App() {
     async (t: TableInfo) => {
       try {
         const d = await invoke<TableProps>("table_props", { conn: activeConn, table: qname(t) });
+        const dl = conns.find((c) => c.id === activeConn)?.engine;
         const defs = d.columns.map(
           (c) =>
-            `  "${c.name}" ${c.data_type}` +
+            `  ${quoteIdent(c.name, dl)} ${c.data_type}` +
             (c.default ? ` DEFAULT ${c.default}` : "") +
             (c.nullable ? "" : " NOT NULL"),
         );
-        const pk = d.columns.filter((c) => c.pk).map((c) => `"${c.name}"`);
+        const pk = d.columns.filter((c) => c.pk).map((c) => quoteIdent(c.name, dl));
         if (pk.length) defs.push(`  PRIMARY KEY (${pk.join(", ")})`);
         copy(`CREATE TABLE ${qname(t)} (\n${defs.join(",\n")}\n);`, " CREATE TABLE");
       } catch (e) {
@@ -3023,8 +3149,11 @@ export default function App() {
     setTesting(true);
     setTest(null);
     try {
-      const info = await invoke<ConnInfo>("test_connection", { url: connUrl(c) });
-      setTest({ ok: true, msg: `${info.engine} · ${info.version.split(" on ")[0]}` });
+      const info = await invoke<ConnInfo>("test_connection", { url: connUrl(c), ssh: sshArg(c) });
+      setTest({
+        ok: true,
+        msg: `${info.engine} · ${info.version.split(" on ")[0]}${info.fingerprint ? ` · ผ่าน SSH (${info.fingerprint})` : ""}`,
+      });
     } catch (e) {
       setTest({ ok: false, msg: String(e) });
     } finally {
@@ -3209,6 +3338,49 @@ export default function App() {
   }, [tab, aiWrite]);
 
   /* ลากคลุมไว้ = รันเฉพาะที่คลุม, ไม่ได้คลุม = รันเฉพาะคำสั่งที่เคอร์เซอร์อยู่ */
+  const formatRef = useRef(() => {});
+  const explainRef = useRef(() => {});
+
+  /* แผนการรันของคำสั่งที่เคอร์เซอร์อยู่ (หรือที่ลากคลุม) — analyze ใช้คำสั่งเดิมที่ explain ไว้ */
+  const explainNow = async (analyze = false) => {
+    if (!tab) return;
+    const st = cmRef.current?.view?.state;
+    const sql =
+      analyze && tab.plan
+        ? tab.plan.sql
+        : st
+          ? st.sliceDoc(st.selection.main.from, st.selection.main.to).trim() || stmtAt(st.doc.toString(), st.selection.main.head)
+          : tab.sql;
+    const c = tab.conn || activeConn;
+    if (!live[c]) return say("แท็บนี้ยังไม่ได้เชื่อมต่อ");
+    if (!sql.trim()) return;
+    patch(tab.id, { running: true, err: undefined });
+    try {
+      const r = await invoke<{ format: Plan["format"]; text: string }>("explain", { sql, analyze, conn: c });
+      patch(tab.id, { running: false, plan: { ...r, analyzed: analyze, sql } });
+    } catch (e) {
+      patch(tab.id, { running: false, err: String(e), plan: undefined });
+    }
+  };
+  explainRef.current = () => explainNow(false);
+  /* จัดรูป SQL: ลากคลุมไว้ = เฉพาะที่คลุม, ไม่ได้คลุม = ทั้ง editor (Shift+Alt+F) */
+  const formatNow = () => {
+    const view = cmRef.current?.view;
+    if (!view || !tab) return;
+    const sel = view.state.selection.main;
+    const from = sel.empty ? 0 : sel.from;
+    const to = sel.empty ? view.state.doc.length : sel.to;
+    const text = view.state.sliceDoc(from, to);
+    if (!text.trim()) return;
+    try {
+      const out = formatSql(text, conns.find((c) => c.id === (tab.conn || activeConn))?.engine);
+      view.dispatch({ changes: { from, to, insert: out } });
+    } catch (e) {
+      say(`จัดรูปไม่ได้ — SQL อาจยังไม่ครบ: ${e instanceof Error ? e.message.split("\n")[0] : e}`);
+    }
+  };
+  formatRef.current = formatNow;
+
   const runNow = useCallback(() => {
     if (!tab) return;
     const st = cmRef.current?.view?.state;
@@ -3226,6 +3398,11 @@ export default function App() {
     const h = (e: KeyboardEvent) => {
       // CodeMirror จัดการไปแล้ว (โฟกัสอยู่ในตัวแก้ไข) — ไม่ต้องรันซ้ำ
       if (e.defaultPrevented) return;
+      if (e.shiftKey && e.altKey && e.code === "KeyF") {
+        e.preventDefault();
+        formatRef.current();
+        return;
+      }
       if (!(e.ctrlKey || e.metaKey)) return;
       // Ctrl+S ถูกจัดการที่ input ของ cell แล้ว — กันไม่ให้ webview เด้ง save page
       if (e.key.toLowerCase() === "s") {
@@ -3237,6 +3414,9 @@ export default function App() {
       } else if (e.key.toLowerCase() === "n") {
         e.preventDefault();
         addTab();
+      } else if (e.key.toLowerCase() === "e") {
+        e.preventDefault();
+        explainRef.current();
       } else if (e.key.toLowerCase() === "k") {
         e.preventDefault();
         setAiOpen(true);
@@ -3333,7 +3513,7 @@ export default function App() {
   const hasUndo = log.some((e) => !e.undone && e.kind !== "drop" && e.kind !== "truncate");
 
   /* แบ่งหน้า / order by: แก้ส่วนท้ายของคำสั่งที่เพิ่งรัน เขียนกลับลง editor ให้เห็นว่ารันอะไร แล้วรันใหม่ */
-  const tail = tab?.res?.columns.length && tab.ran && isSelect(tab.ran) ? parseTail(tab.ran) : null;
+  const tail = tab?.res?.columns.length && !tab.res.sets?.length && tab.ran && isSelect(tab.ran) ? parseTail(tab.ran) : null;
   const rerunSql = (next: string | null) => {
     if (!tab?.ran || !next) return;
     const ran = tab.ran;
@@ -3343,7 +3523,7 @@ export default function App() {
   const rerunTail = (change: Parameters<typeof withTail>[1]) => tab?.ran && rerunSql(withTail(tab.ran, change));
   /* คลิกขวา cell → กรอง: เติมเงื่อนไขเข้า where ของคำสั่งที่เพิ่งรัน แล้วรันใหม่ */
   const filterBy = (col: string, op: FilterOp, v: unknown) =>
-    tab?.ran && rerunSql(addWhere(tab.ran, filterCond(col, op, v)));
+    tab?.ran && rerunSql(addWhere(tab.ran, filterCond(col, op, v, tabDialect)));
 
   /* ดาวจาก editor — เก็บทั้ง editor ของแท็บนี้ (Ctrl+S) */
   const starNow = () => {
@@ -3366,7 +3546,7 @@ export default function App() {
     } else patch(tab.id, { sql: r.sql });
   };
   const orderBy = (col: string, dir: "asc" | "desc" | null) =>
-    rerunTail({ order: dir ? `${quoteIdent(col)} ${dir}` : null, offset: null });
+    rerunTail({ order: dir ? `${quoteIdent(col, tabDialect)} ${dir}` : null, offset: null });
 
   // เมนูเครื่องมือมุมซ้ายล่าง — ปุ่มใหม่ในอนาคตเพิ่มในรายการนี้ที่เดียว
   const tools = [
@@ -3380,7 +3560,7 @@ export default function App() {
       run: () => (setQSearch(""), setQClear(false), setQOpen(true)),
       off: false,
     },
-    { label: "Backup", hint: "dump ทั้ง database เป็นไฟล์ .sql", icon: FloppyDisk, run: backup, off: !connected },
+    { label: "Backup", hint: pgLike(activeEngine) ? "dump ทั้ง database เป็นไฟล์ .sql" : "ยังทำได้เฉพาะ Postgres / Redshift", icon: FloppyDisk, run: backup, off: !connected || !pgLike(activeEngine) },
     { label: "Restore", hint: "รันไฟล์ .sql กลับเข้า database นี้", icon: ArrowCounterClockwise, run: pickRestore, off: !connected || activeRo },
     {
       label: "Sync",
@@ -3390,7 +3570,14 @@ export default function App() {
         conns.filter((c) => live[c.id]).length < 2
           ? say("ต้องเชื่อมต่ออย่างน้อย 2 connection (ต้นทางกับปลายทาง) ก่อน")
           : setSyncOpen(true),
-      off: !connected,
+      off: !connected || !pgLike(activeEngine),
+    },
+    {
+      label: "Sessions",
+      hint: activeEngine === "sqlite" ? "SQLite ไม่มี session" : "ใครต่ออยู่ ใครโดน lock ขวาง — ยกเลิก query / ตัด session ได้",
+      icon: Pulse,
+      run: () => setSessConn(activeConn),
+      off: !connected || activeEngine === "sqlite",
     },
     { label: "Export connections", hint: "รายการ connection เป็นไฟล์ .json (ไม่มี password)", icon: ExportIcon, run: exportConns, off: !conns.length },
     { label: "Import connections", hint: "เพิ่ม connection จากไฟล์ที่คนอื่นส่งมา", icon: AddressBook, run: importConns, off: false },
@@ -3693,6 +3880,22 @@ export default function App() {
             <span style={{ opacity: 0.55 }}>Ctrl+↵</span>
           </button>
           <button
+            className="btn sm"
+            onClick={() => explainNow(false)}
+            disabled={!connected || tab?.running}
+            title="แผนการรัน query ของคำสั่งที่เคอร์เซอร์อยู่ — ดูว่าช้าตรงไหน ใช้ index ไหม (Ctrl+E)"
+          >
+            <TreeStructure size={14} weight="duotone" /> Explain
+          </button>
+          <button
+            className="btn sm"
+            onClick={formatNow}
+            disabled={!tab?.sql.trim()}
+            title={hasSel ? "จัดรูปเฉพาะที่ลากคลุม (Shift+Alt+F)" : "จัดรูป SQL ทั้ง editor (Shift+Alt+F)"}
+          >
+            <TextAlignLeft size={14} />
+          </button>
+          <button
             className={"btn sm starbtn" + (tabSaved ? " on" : "")}
             onClick={starNow}
             disabled={!tab?.sql.trim()}
@@ -3745,6 +3948,13 @@ export default function App() {
               title="ดูทีละแถว คอลัมน์เรียงลงมา"
             >
               <Rows size={14} weight="duotone" /> Record
+            </button>
+            <button
+              className={mode === "chart" ? "on" : ""}
+              onClick={() => setMode("chart")}
+              title="กราฟจากผลลัพธ์บนจอ — แท่ง / เส้น"
+            >
+              <ChartBar size={14} weight="duotone" /> Chart
             </button>
           </div>
           <div className="filterbox">
@@ -3858,7 +4068,44 @@ export default function App() {
 
         <div className="dragbar" onMouseDown={startDrag} />
 
-        {tab?.err ? (
+        {!tab?.err && tab?.res?.sets && tab.res.sets.length > 1 && (
+          <div className="setbar">
+            {(() => {
+              const sets = tab.res.sets;
+              const res = tab.res;
+              // ชุดที่ backend เลือกให้ตอนแรก = select ตัวสุดท้าย (ไม่มีก็ตัวสุดท้าย)
+              const first = sets.map((x) => x.columns.length > 0).lastIndexOf(true);
+              const on = tab.setIdx ?? (first >= 0 ? first : sets.length - 1);
+              const sql = statements(tab.ran ?? "");
+              return sets.map((st, i) => (
+                <button
+                  key={i}
+                  className={i === on ? "on" : ""}
+                  title={sql.length === sets.length ? sql[i].trim() : undefined}
+                  onClick={() => patch(tab.id, { setIdx: i, res: { ...res, ...st } })}
+                >
+                  <b>{i + 1}</b>
+                  <span>
+                    {sql.length === sets.length
+                      ? sql[i].replace(/--[^\n]*/g, " ").replace(/\s+/g, " ").trim().slice(0, 40)
+                      : `คำสั่งที่ ${i + 1}`}
+                  </span>
+                  <em>{st.columns.length ? `${st.rows.length.toLocaleString()} แถว` : `กระทบ ${st.affected.toLocaleString()}`}</em>
+                </button>
+              ));
+            })()}
+          </div>
+        )}
+
+        {tab?.plan && !tab.running && !tab.err ? (
+          <ExplainView
+            plan={tab.plan}
+            canAnalyze={tabDialect === "postgres" || tabDialect === "mysql" || !tabDialect}
+            busy={!!tab.running}
+            onAnalyze={() => explainNow(true)}
+            onClose={() => patch(tab.id, { plan: undefined })}
+          />
+        ) : tab?.err ? (
           <div className="result">
             <div className="err">{tab.err}</div>
             {tab.failed && (
@@ -3903,13 +4150,15 @@ export default function App() {
               )}
             </div>
           </div>
+        ) : tab?.res && mode === "chart" ? (
+          <ChartView res={tab.res} />
         ) : tab?.res ? (
           <Grid
             res={tab.res}
             pk={rowKey ?? []}
             editable={editable}
             filter={gridFilter}
-            mode={mode}
+            mode={mode === "chart" ? "grid" : mode}
             onEdit={editCell}
             onSelect={setSelRows}
             onExportJson={(rows) => exportAs("json", rows)}
@@ -3917,6 +4166,7 @@ export default function App() {
             onFilter={tail ? filterBy : undefined}
             onPasteCells={editable ? pasteInto : undefined}
             serverOrder={tail?.order}
+            dialect={tabDialect}
             newCols={editable && tcols[keyId]?.length ? tcols[keyId] : undefined}
             onInsert={insertNew}
             onCopy={(txt) => {
@@ -4038,7 +4288,7 @@ export default function App() {
             <p>เลือกชนิดฐานข้อมูล แล้วกรอกทีละช่อง หรือวาง connection string ลงช่อง Host</p>
 
             <div className="engines">
-              {(["postgres", "redshift"] as Engine[]).map((e) => (
+              {ENGINES.map(({ id: e, name }) => (
                 <button
                   key={e}
                   className={"engine" + (form.engine === e ? " on" : "")}
@@ -4048,12 +4298,15 @@ export default function App() {
                       engine: e,
                       // พอร์ตยังเป็นค่าเริ่มต้นของอีกฝั่งอยู่ค่อยเปลี่ยนให้ ไม่ทับที่พิมพ์เอง
                       port: form.port === PORTS[form.engine] || !form.port ? PORTS[e] : form.port,
+                      // ค่าตั้งต้นของ Postgres (localhost / postgres) ไม่มีความหมายกับ SQLite / MySQL
+                      ...(e === "sqlite" ? { host: "", user: "", pass: "", ssl: false, db: form.engine === "sqlite" ? form.db : "" } : {}),
+                      ...(e === "mysql" && form.user === "postgres" ? { user: "root", db: form.db === "postgres" ? "" : form.db } : {}),
                     })
                   }
                 >
                   <EngineLogo engine={e} size={26} />
-                  <b>{e === "redshift" ? "Amazon Redshift" : "PostgreSQL"}</b>
-                  <em>พอร์ต {PORTS[e]}</em>
+                  <b>{name}</b>
+                  <em>{e === "sqlite" ? "ไฟล์ในเครื่อง" : `พอร์ต ${PORTS[e]}`}</em>
                 </button>
               ))}
             </div>
@@ -4068,18 +4321,40 @@ export default function App() {
               />
             </div>
 
+            {form.engine === "sqlite" ? (
+              <div className="field">
+                <label>ไฟล์ database</label>
+                <div className="filepick">
+                  <input
+                    placeholder="C:\data\app.db"
+                    value={form.db}
+                    onChange={(e) => setForm({ ...form, db: e.target.value.replace(/^sqlite:(\/\/)?/i, "") })}
+                  />
+                  <button
+                    className="btn sm"
+                    onClick={async () => {
+                      const path = await open({ filters: [{ name: "SQLite", extensions: ["db", "sqlite", "sqlite3", "db3"] }, { name: "ทุกไฟล์", extensions: ["*"] }] });
+                      if (typeof path === "string") setForm((f) => f && { ...f, db: path, name: f.name || path.split(/[\\/]/).pop() || "" });
+                    }}
+                  >
+                    เลือกไฟล์
+                  </button>
+                </div>
+              </div>
+            ) : (
+            <>
             <div className="field row2">
               <div>
                 <label>Host</label>
                 <input
-                  placeholder="localhost หรือ postgres://…"
+                  placeholder={form.engine === "mysql" ? "localhost หรือ mysql://…" : "localhost หรือ postgres://…"}
                   value={form.url ?? form.host}
                   onBlur={() => setForm((f) => f && splitUrl(f))}
                   onChange={(e) => {
                     const v = e.target.value;
                     // วาง URL มา → เก็บเป็น URL ล้วนแทนการแยกช่อง
                     setForm(
-                      v.startsWith("postgres")
+                      /^(postgres|mysql|mariadb|sqlite):/i.test(v)
                         ? { ...form, url: v }
                         : { ...form, url: undefined, host: v },
                     );
@@ -4117,6 +4392,8 @@ export default function App() {
               <label>Database</label>
               <input value={form.db} onChange={(e) => setForm({ ...form, db: e.target.value })} />
             </div>
+            </>
+            )}
 
             <div className="field">
               <label>Group</label>
@@ -4133,14 +4410,16 @@ export default function App() {
               </datalist>
             </div>
 
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={form.ssl}
-                onChange={(e) => setForm({ ...form, ssl: e.target.checked })}
-              />
-              ใช้ SSL (sslmode=require)
-            </label>
+            {form.engine !== "sqlite" && (
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={form.ssl}
+                  onChange={(e) => setForm({ ...form, ssl: e.target.checked })}
+                />
+                ใช้ SSL ({form.engine === "mysql" ? "ssl-mode=REQUIRED" : "sslmode=require"})
+              </label>
+            )}
             <label className="check">
               <input
                 type="checkbox"
@@ -4157,6 +4436,93 @@ export default function App() {
               />
               อ่านอย่างเดียว — ห้ามแก้ข้อมูลทุกทาง (ถ้าเชื่อมต่ออยู่ ให้ตัดแล้วต่อใหม่)
             </label>
+
+            {form.engine !== "sqlite" && (
+              <div className="sshbox">
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={!!form.ssh?.on}
+                    onChange={(e) =>
+                      setForm({
+                        ...form,
+                        ssh: { host: "", port: "22", user: "", auth: "password", ...form.ssh, on: e.target.checked },
+                      })
+                    }
+                  />
+                  ต่อผ่าน SSH tunnel (bastion / jump host) — ช่อง Host ข้างบนคือที่อยู่ของ database ที่ SSH server มองเห็น
+                </label>
+                {form.ssh?.on && (
+                  <>
+                    <div className="field row2">
+                      <div>
+                        <label>SSH host</label>
+                        <input
+                          value={form.ssh.host}
+                          placeholder="bastion.example.com"
+                          onChange={(e) => setForm({ ...form, ssh: { ...form.ssh!, host: e.target.value, fingerprint: undefined } })}
+                        />
+                      </div>
+                      <div>
+                        <label>Port</label>
+                        <input value={form.ssh.port} onChange={(e) => setForm({ ...form, ssh: { ...form.ssh!, port: e.target.value } })} />
+                      </div>
+                    </div>
+                    <div className="field row2 even">
+                      <div>
+                        <label>SSH user</label>
+                        <input value={form.ssh.user} onChange={(e) => setForm({ ...form, ssh: { ...form.ssh!, user: e.target.value } })} />
+                      </div>
+                      <div>
+                        <label>เข้าด้วย</label>
+                        <select
+                          value={form.ssh.auth}
+                          onChange={(e) => setForm({ ...form, ssh: { ...form.ssh!, auth: e.target.value as SshCfg["auth"] } })}
+                        >
+                          <option value="password">Password</option>
+                          <option value="key">Private key</option>
+                        </select>
+                      </div>
+                    </div>
+                    {form.ssh.auth === "key" && (
+                      <div className="field">
+                        <label>ไฟล์ private key</label>
+                        <div className="filepick">
+                          <input
+                            value={form.ssh.keyPath ?? ""}
+                            placeholder="C:\Users\me\.ssh\id_ed25519"
+                            onChange={(e) => setForm({ ...form, ssh: { ...form.ssh!, keyPath: e.target.value } })}
+                          />
+                          <button
+                            className="btn sm"
+                            onClick={async () => {
+                              const path = await open({});
+                              if (typeof path === "string") setForm((f) => (f?.ssh ? { ...f, ssh: { ...f.ssh, keyPath: path } } : f));
+                            }}
+                          >
+                            เลือกไฟล์
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    <div className="field">
+                      <label>{form.ssh.auth === "key" ? "Passphrase ของ key (ถ้ามี)" : "SSH password"}</label>
+                      <input type="password" value={form.sshPass ?? ""} onChange={(e) => setForm({ ...form, sshPass: e.target.value })} />
+                    </div>
+                    {form.ssh.fingerprint && (
+                      <div className="sshfp">
+                        <span title="host key ของ SSH server ที่จำไว้ตั้งแต่ต่อครั้งแรก — ถ้าไม่ตรงจะต่อไม่ได้">
+                          host key ที่จำไว้: <code>{form.ssh.fingerprint}</code>
+                        </span>
+                        <button className="btn sm" onClick={() => setForm({ ...form, ssh: { ...form.ssh!, fingerprint: undefined } })}>
+                          ล้าง
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
 
             {test && (
               <div className={"testres " + (test.ok ? "ok" : "bad")}>
@@ -4403,6 +4769,14 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {sessConn && (
+        <SessionsView
+          conn={sessConn}
+          name={conns.find((c) => c.id === sessConn)?.name ?? ""}
+          onClose={() => setSessConn("")}
+        />
       )}
 
       {qOpen && (
