@@ -48,6 +48,8 @@
 - Autocomplete รู้จักชื่อตาราง คอลัมน์ของตารางใน `FROM` และค่าที่มีจริงในคอลัมน์ตอนพิมพ์ `where col = '`
 - ประวัติ SQL ที่รันไปแล้ว ค้นหาได้ (`Ctrl+H`) กดดาว (หรือ `Ctrl+S` ใน editor) เพื่อเก็บ query ที่ใช้บ่อยไว้พร้อมตั้งชื่อ
 - กรองจาก cell ได้ด้วยการคลิกขวา (เท่ากับ, ไม่เท่ากับ, มีคำนี้, เป็น NULL) และแบ่งหน้า หรือ order by จากหัวคอลัมน์
+- ช่องค้นหาเหนือผลลัพธ์มี 2 โหมด: Search ค้นคำในแถวที่โหลดมาแล้ว, Query พิมพ์เงื่อนไข where เช่น `key = '123'` แล้วรันใหม่
+- แผง Value ดูค่าเต็มของ cell ที่เลือก JSON จัดรูปและใส่สีให้
 - รันหลายคำสั่งพร้อมกันแล้วสลับดูผลของแต่ละคำสั่งได้
 - จัดรูป SQL (`Shift+Alt+F`) ตามชนิดของ database
 - AI ช่วยเขียนและแก้ SQL ที่ error ผ่าน [Claude Code](https://claude.com/claude-code) หรือ [Codex CLI](https://github.com/openai/codex) ที่ login ไว้ในเครื่อง เลือก model ของ Claude ได้ทุกรุ่น (ค่าเริ่มต้นคือ Haiku) หรือ model ของ Codex ตัวแอปไม่ต้องเก็บ API key
@@ -63,7 +65,7 @@
 - กราฟแท่งหรือเส้นจากผลลัพธ์
 - ER diagram ที่อ่าน foreign key ทั้ง database
 - Backup และ restore ทั้ง database เป็นไฟล์ `.sql` เดียว โดยไม่ต้องมี `pg_dump`
-- Sync ตารางข้าม connection (เช่น dev ไป uat) ทั้งโครงสร้างและข้อมูล
+- Sync ตารางข้าม connection (เช่น dev ไป uat) ทั้งโครงสร้างและข้อมูล หรือเฉพาะคอลัมน์ที่เลือก
 - Export ผลลัพธ์เป็น Excel (`.xlsx` ตัวเลขยังเป็นตัวเลข), CSV, SQL หรือ JSON และ import CSV หรือ SQL (CSV เป็น UTF-8 + BOM เปิดใน Excel แล้วอ่านภาษาไทยได้)
 
 **ใช้งานทั่วไป**

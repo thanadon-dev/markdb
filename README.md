@@ -49,6 +49,8 @@ The installer is under 5 MB. It starts fast and uses little memory, because it r
 - Autocomplete for table names, the columns of tables in `FROM`, and real values from a column when you type `where col = '`.
 - A searchable history of every query you ran (`Ctrl+H`). Star a query (or press `Ctrl+S` in the editor) to keep it with a name.
 - Right-click a cell to filter by it (equals, not equals, contains, is NULL). Paginate, or order by from the column header.
+- A search bar above the results with two modes: Search finds text in the loaded rows, Query takes a `where` condition such as `key = '123'` and runs the query again.
+- A Value panel shows the full value of the selected cell, with JSON formatted and colored.
 - Run several statements at once and switch between each statement's result.
 - Format SQL (`Shift+Alt+F`) in the dialect of the connection.
 - AI writes SQL and fixes failing queries through [Claude Code](https://claude.com/claude-code) or [Codex CLI](https://github.com/openai/codex) logged in on your machine. Pick any Claude model (Haiku by default) or a Codex model. The app never stores an API key.
@@ -64,7 +66,7 @@ The installer is under 5 MB. It starts fast and uses little memory, because it r
 - Chart any result as bars or lines.
 - An ER diagram built from every foreign key in the database.
 - Back up and restore a whole database as a single `.sql` file, without `pg_dump`.
-- Sync tables across connections (for example dev to uat), both schema and data.
+- Sync tables across connections (for example dev to uat), both schema and data, or only the columns you pick.
 - Export results to Excel (`.xlsx`, numbers stay numbers), CSV, SQL or JSON. Import CSV or SQL. CSV is UTF-8 with a BOM, so Excel opens it with non-Latin text intact.
 
 **Everyday use**
