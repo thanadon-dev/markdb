@@ -6,6 +6,8 @@
 // เทียบ md5 ต่อแถวก่อน แล้วค่อยดึงเฉพาะแถวที่ต่าง
 // เทียบโครงสร้างแค่คอลัมน์ (type / default / not null / generated) กับ primary key
 // ไม่เทียบ index, foreign key, trigger, identity — ตารางที่ไม่มี PK และ Redshift ยังไม่รองรับ
+// เลือกเฉพาะบางคอลัมน์ได้ (Tbl.cols) — เทียบ / แก้ / เพิ่มแค่คอลัมน์นั้นกับ primary key
+// คอลัมน์อื่นในปลายทางไม่ถูกแตะ ทั้งข้อมูลและโครงสร้าง
 
 use super::{db, err, ident, lit, where_keys, AppState, Engine, KeyVal, R};
 use serde::{Deserialize, Serialize};
@@ -34,6 +36,9 @@ const SAMPLE: usize = 20;
 pub struct Tbl {
     schema: String,
     name: String,
+    /// sync เฉพาะคอลัมน์เหล่านี้ (ไม่ส่ง / ว่าง = ทุกคอลัมน์) — primary key ใส่ให้เองเสมอ
+    #[serde(default)]
+    cols: Vec<String>,
 }
 
 impl Tbl {
@@ -58,6 +63,7 @@ struct Col {
 /// constraint ของตาราง: (ชื่อ, นิยาม, คอลัมน์)
 type Con = (String, String, Vec<String>);
 
+#[derive(Clone)]
 struct Meta {
     cols: Vec<Col>,
     pk: Option<Con>,
@@ -66,6 +72,12 @@ struct Meta {
 }
 
 type Rows = Vec<(String, Vec<Option<String>>)>;
+
+/// ตัดให้เหลือแค่คอลัมน์ใน keep — constraint ที่อ้างคอลัมน์อื่นตัดทิ้งด้วย (ใช้ตอนสร้างตารางใหม่)
+fn only(m: &mut Meta, keep: &HashSet<&str>) {
+    m.cols.retain(|c| keep.contains(c.name.as_str()));
+    m.others.retain(|o| o.2.iter().all(|c| keep.contains(c.as_str())));
+}
 
 #[derive(Serialize, Default)]
 pub struct Plan {
@@ -426,10 +438,27 @@ async fn build(sc: &mut PgConnection, dc: &mut PgConnection, t: &Tbl) -> R<Built
         b.plan.error = Some("ต้นทางไม่มี primary key — ยังไม่รองรับ".into());
         return Ok(b);
     };
+    let mut sm = sm;
+    let keep: HashSet<&str> = t.cols.iter().chain(&pk).map(String::as_str).collect();
+    if !t.cols.is_empty() {
+        if let Some(c) = t.cols.iter().find(|c| !sm.cols.iter().any(|x| &x.name == *c)) {
+            b.plan.error = Some(format!("ต้นทางไม่มีคอลัมน์ {}", c));
+            return Ok(b);
+        }
+        only(&mut sm, &keep);
+    }
     let dm = meta(dc, t).await?;
     b.existed = dm.is_some();
 
-    let ddl = ddl_diff(t, &sm, dm.as_ref());
+    // เทียบโครงสร้างแค่คอลัมน์ที่เลือก — คอลัมน์อื่นในปลายทางไม่นับว่า "เกิน"
+    // แต่ยังโหลดแถวปลายทางครบทุกคอลัมน์ด้านล่าง ไฟล์สำรองจะได้คืนค่าได้ทั้งแถว
+    let dm_cmp = dm.clone().map(|mut m| {
+        if !t.cols.is_empty() {
+            only(&mut m, &keep);
+        }
+        m
+    });
+    let ddl = ddl_diff(t, &sm, dm_cmp.as_ref());
     b.plan.diffs = ddl.diffs;
     b.plan.ddl = ddl.pre.iter().chain(&ddl.post).cloned().collect();
     b.pre = ddl.pre;
@@ -823,7 +852,7 @@ mod tests {
         .await
         .unwrap();
 
-        let t = |n: &str| Tbl { schema: "public".into(), name: n.into() };
+        let t = |n: &str| Tbl { schema: "public".into(), name: n.into(), cols: Vec::new() };
         let tables = vec![t("child"), t("Meter_Configuration"), t("parent"), t("only_dev"), t("nopk")];
         let plans = plan_core(&dev, &uat, &tables).await.unwrap();
         let p = |n: &str| plans.iter().find(|p| p.name == n).unwrap();
@@ -883,5 +912,82 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n.0, 1);
+    }
+
+    /// เลือกเฉพาะบางคอลัมน์: คอลัมน์อื่นในปลายทางต้องไม่ถูกแตะ ทั้งค่าและโครงสร้าง
+    #[tokio::test]
+    #[ignore]
+    async fn sync_some_columns() {
+        let base = std::env::var("MARKDB_TEST_PG").expect("ตั้ง MARKDB_TEST_PG ก่อน");
+        let admin = PgPool::connect(&format!("{}/postgres", base)).await.unwrap();
+        for d in ["markdb_cols_dev", "markdb_cols_uat"] {
+            admin.execute(format!("drop database if exists {} with (force)", d).as_str()).await.unwrap();
+            admin.execute(format!("create database {}", d).as_str()).await.unwrap();
+        }
+        let dev = PgPool::connect(&format!("{}/markdb_cols_dev", base)).await.unwrap();
+        let uat = PgPool::connect(&format!("{}/markdb_cols_uat", base)).await.unwrap();
+        dev.execute(
+            "create table t (id int primary key, a text, b text, c int not null default 0);
+             insert into t values (1, 'a1', 'b1', 1), (2, 'a2', 'b2', 2), (3, 'a3', 'b3', 3);
+             create table fresh (id int primary key, a text, b text unique);
+             insert into fresh values (1, 'a1', 'b1');",
+        )
+        .await
+        .unwrap();
+        uat.execute(
+            "create table t (id int primary key, a varchar(5), b varchar(10), c int not null default 0, extra text);
+             insert into t values (1, 'x', 'keep', 9, 'e1'), (2, 'a2', 'keep2', 9, 'e2'), (9, 'gone', 'g', 0, 'z');",
+        )
+        .await
+        .unwrap();
+
+        let pick = |n: &str, c: &[&str]| Tbl { schema: "public".into(), name: n.into(), cols: s(c) };
+        let tables = vec![pick("t", &["a"]), pick("fresh", &["a"])];
+        let plans = plan_core(&dev, &uat, &tables).await.unwrap();
+        let t = &plans.iter().find(|p| p.name == "t").unwrap();
+        // b ต่าง type และ extra เกินมา แต่ไม่ได้เลือก → ต้องไม่โผล่
+        assert_eq!(t.diffs.len(), 1, "{:#?}", t.diffs);
+        assert!(t.diffs[0].starts_with("a:"), "{:?}", t.diffs);
+        assert_eq!((t.add, t.change, t.del), (1, 1, 1));
+        assert!(t.sample.iter().all(|s| s.cells.iter().all(|c| c.0 == "a" || c.0 == "id")));
+
+        let bad = plan_core(&dev, &uat, &[pick("t", &["nope"])]).await.unwrap();
+        assert!(bad[0].error.as_deref().unwrap().contains("nope"));
+
+        let bk = std::env::temp_dir().join("markdb_cols_bk.sql");
+        let alter: HashSet<String> = ["public.t".to_string(), "public.fresh".to_string()].into();
+        apply_core(&dev, &uat, &tables, &alter, false, bk.to_str().unwrap()).await.unwrap();
+        let rows: Vec<(i32, Option<String>, Option<String>, i32, Option<String>)> =
+            sqlx::query_as("select id, a::text, b::text, c, extra from t order by id").fetch_all(&uat).await.unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (1, Some("a1".into()), Some("keep".into()), 9, Some("e1".into())),
+                (2, Some("a2".into()), Some("keep2".into()), 9, Some("e2".into())),
+                // แถวใหม่ได้แค่ id กับ a — คอลัมน์อื่นเป็น default ของปลายทาง
+                (3, Some("a3".into()), None, 0, None),
+                (9, Some("gone".into()), Some("g".into()), 0, Some("z".into())),
+            ]
+        );
+        let ty: (String,) = sqlx::query_as(
+            "select format_type(atttypid, atttypmod) from pg_attribute where attrelid = 't'::regclass and attname = 'b'",
+        )
+        .fetch_one(&uat)
+        .await
+        .unwrap();
+        assert_eq!(ty.0, "character varying(10)");
+        // ตารางที่ยังไม่มีในปลายทาง สร้างแค่ id กับ a — unique ของ b ที่ไม่ได้เลือกต้องไม่ตามมา
+        let n: (i64,) = sqlx::query_as("select count(*) from information_schema.columns where table_name = 'fresh'")
+            .fetch_one(&uat)
+            .await
+            .unwrap();
+        assert_eq!(n.0, 2);
+
+        let again = plan_core(&dev, &uat, &tables).await.unwrap();
+        let t = &again[0];
+        assert!(t.diffs.is_empty(), "{:?}", t.diffs);
+        assert_eq!((t.add, t.change, t.del), (0, 0, 1));
+        // ไฟล์สำรองต้องเก็บทั้งแถว ไม่ใช่แค่คอลัมน์ที่เลือก
+        assert!(std::fs::read_to_string(&bk).unwrap().contains("'keep2'"));
     }
 }
