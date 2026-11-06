@@ -3457,3 +3457,49 @@ div.syncrow .check {
 .valbody .jlit {
   color: var(--violet);
 }
+
+/* การ์ดแจ้งเวอร์ชันใหม่ มุมขวาล่าง */
+.upnotice {
+  position: fixed;
+  right: 18px;
+  bottom: 44px;
+  z-index: 61;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 10px 10px 14px;
+  border: 1px solid rgba(74, 222, 128, 0.45);
+  border-radius: 12px;
+  background: var(--panel-2);
+  box-shadow: 0 10px 30px var(--shadow);
+  color: var(--green);
+  animation: popin 0.42s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.upnotice div {
+  display: grid;
+  gap: 1px;
+}
+
+.upnotice b {
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.upnotice span {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+@keyframes popin {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.96);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .upnotice {
+    animation: none;
+  }
+}

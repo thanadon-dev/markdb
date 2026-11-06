@@ -19,6 +19,7 @@ import { ExplainView, type Plan } from "./ExplainView";
 import { SessionsView } from "./SessionsView";
 import { ChartView } from "./ChartView";
 import { ValueView } from "./ValueView";
+import { chime } from "./chime";
 import * as hist from "./history";
 import { PostgreSQL, sql as sqlLang } from "@codemirror/lang-sql";
 import { createTheme } from "@uiw/codemirror-themes";
@@ -2369,6 +2370,9 @@ export default function App() {
   const [update, setUpdate] = useState<Update | null>(null);
   const [pct, setPct] = useState<number | null>(null);
   const [updatesOpen, setUpdatesOpen] = useState(false);
+  /** การ์ดแจ้งเวอร์ชันใหม่มุมขวาล่าง — เลขเวอร์ชันที่แจ้ง */
+  const [notice, setNotice] = useState<string | null>(null);
+  const told = useRef("");
   const [rels, setRels] = useState<Release[] | null>(null);
   const [relErr, setRelErr] = useState("");
   const [gridFilter, setGridFilter] = useState("");
@@ -3147,19 +3151,28 @@ export default function App() {
     [tab, say],
   );
 
+  /* เจอเวอร์ชันใหม่: ติ้งติ่ง + การ์ดมุมขวาล่าง — เวอร์ชันละครั้ง ไม่ดังซ้ำทุกรอบที่เช็ค */
+  const announce = useCallback((u: Update) => {
+    setUpdate(u);
+    if (told.current === u.version) return;
+    told.current = u.version;
+    setNotice(u.version);
+    chime();
+  }, []);
+
   /* เช็คอัปเดตตอนเปิดแอป — เงียบไว้ถ้าเช็คไม่ได้ (ออฟไลน์/ยังไม่มี release) */
   const checkUpdate = useCallback(
     async (loud = false) => {
       try {
         const u = await check();
         setUpdate(u ?? null);
-        if (u) setUpdatesOpen(true);
+        if (u) announce(u);
         else if (loud) say(`ใช้เวอร์ชันล่าสุดอยู่แล้ว (${version})`);
       } catch (e) {
         if (loud) say(String(e));
       }
     },
-    [version, say],
+    [version, say, announce],
   );
 
   /* ประวัติแต่ละเวอร์ชันดึงสดจาก GitHub Releases — ไม่ต้องฝัง changelog ไว้ในแอป
@@ -3184,13 +3197,13 @@ export default function App() {
 
   useEffect(() => {
     checkUpdate();
-    // เปิดแอปทิ้งไว้ทั้งวันก็ยังรู้ว่ามีเวอร์ชันใหม่ — เช็คเงียบ ๆ ทุก 30 นาที
-    // แค่ขึ้น badge ที่เลขเวอร์ชัน ไม่เด้งหน้าต่างทับงานที่ทำอยู่
+    // เปิดแอปทิ้งไว้ทั้งวันก็รู้ภายใน 10 นาทีหลังปล่อยเวอร์ชันใหม่ — ไฟล์ latest.json เล็กมาก เช็คถี่ได้
+    // แจ้งด้วยการ์ดมุมจอ ไม่เด้งหน้าต่างทับงานที่ทำอยู่
     const t = setInterval(() => {
       check()
-        .then((u) => u && setUpdate(u))
+        .then((u) => u && announce(u))
         .catch(() => {});
-    }, 30 * 60 * 1000);
+    }, 10 * 60 * 1000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -5584,6 +5597,28 @@ export default function App() {
         <div className="toast connecting">
           <Spinner size={15} className="spin" />
           กำลังเชื่อมต่อ {conns.find((c) => c.id === connecting)?.name}…
+        </div>
+      )}
+
+      {notice && update && !updatesOpen && (
+        <div className="upnotice" role="status">
+          <Confetti size={20} weight="duotone" />
+          <div>
+            <b>มีเวอร์ชันใหม่ v{notice}</b>
+            <span>ตอนนี้ใช้ v{version}</span>
+          </div>
+          <button
+            className="btn primary sm"
+            onClick={() => {
+              setNotice(null);
+              openUpdates();
+            }}
+          >
+            ดูและอัปเดต
+          </button>
+          <button className="btn ghost sm" onClick={() => setNotice(null)} title="ไว้ทีหลัง">
+            <X size={13} />
+          </button>
         </div>
       )}
 
