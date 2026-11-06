@@ -2035,6 +2035,59 @@ select:focus {
   font-family: "JetBrains Mono", Consolas, monospace;
 }
 
+div.syncrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+div.syncrow .check {
+  color: var(--text);
+}
+
+.synccolbtn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.synccolbtn:hover {
+  background: var(--g-hover);
+}
+
+.synccolbtn.on {
+  color: var(--strong);
+}
+
+.synccolbtn .caret {
+  transition: transform 0.12s;
+}
+
+.synccolbtn .caret.open {
+  transform: rotate(90deg);
+}
+
+.synccols {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 4px 12px;
+  padding: 6px 12px 10px 34px;
+  border-bottom: 1px solid var(--g-line);
+  font-family: "JetBrains Mono", Consolas, monospace;
+}
+
+.modal .synccols p {
+  grid-column: 1 / -1;
+  margin: 0 0 4px;
+  font-family: inherit;
+}
+
 .syncrow.head {
   position: sticky;
   top: 0;
@@ -3265,4 +3318,142 @@ select:focus {
 .sshfp .btn {
   margin-left: auto;
   flex: none;
+}
+
+/* ---------- ช่องค้นหา / Query เหนือผลลัพธ์ + แผง Value ---------- */
+
+.findbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.findbar .seg {
+  flex: none;
+}
+
+.filterbox.wide {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  height: 30px;
+}
+
+.filterbox.wide input {
+  flex: 1;
+  min-width: 0;
+}
+
+.filterbox.where input {
+  font-family: "JetBrains Mono", Consolas, monospace;
+}
+
+.filterbox.where.on {
+  border-color: var(--sky);
+}
+
+.wherekw {
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 11px;
+  color: var(--violet);
+}
+
+.resrow {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.resrow > .result {
+  min-width: 0;
+}
+
+.valview {
+  width: clamp(280px, 34%, 560px);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--bg-2);
+  min-height: 0;
+}
+
+.valhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.valhead b {
+  color: var(--text);
+  font-family: "JetBrains Mono", Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.valhead .seg button {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.valhead > button {
+  display: flex;
+  padding: 4px;
+  border-radius: 5px;
+  color: var(--dim);
+}
+
+.valhead > button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.valbody {
+  flex: 1;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+  user-select: text;
+}
+
+.valbody.null {
+  color: var(--dim);
+  font-style: italic;
+}
+
+.valempty {
+  padding: 22px;
+  text-align: center;
+  color: var(--dim);
+  font-size: 12.5px;
+}
+
+.valbody .jkey {
+  color: var(--sky);
+}
+
+.valbody .jstr {
+  color: var(--green);
+}
+
+.valbody .jnum {
+  color: var(--yellow);
+}
+
+.valbody .jlit {
+  color: var(--violet);
 }

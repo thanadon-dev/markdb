@@ -18,6 +18,7 @@ import { formatSql } from "./format";
 import { ExplainView, type Plan } from "./ExplainView";
 import { SessionsView } from "./SessionsView";
 import { ChartView } from "./ChartView";
+import { ValueView } from "./ValueView";
 import * as hist from "./history";
 import { PostgreSQL, sql as sqlLang } from "@codemirror/lang-sql";
 import { createTheme } from "@uiw/codemirror-themes";
@@ -129,6 +130,8 @@ type Tab = {
   ranAt?: number;
   /** คำสั่งที่รันแล้ว error — ปุ่ม "ให้ AI แก้" ใช้ตัวนี้ */
   failed?: string;
+  /** ตัวกรองจากช่อง Query: base = SQL ก่อนกรอง, sql = SQL ที่เติม where แล้ว — กรองใหม่จะเริ่มจาก base ไม่ซ้อนกัน */
+  qf?: { base: string; sql: string; expr: string };
 };
 type ColumnInfo = {
   name: string;
@@ -233,6 +236,8 @@ const sshArg = (c: Conn) =>
     : null;
 
 const CONNS_KEY = "markdb.conns";
+const FIND_KEY = "markdb.findMode";
+const VALUE_KEY = "markdb.valuePanel";
 const TABS_KEY = "markdb.tabs";
 const AI_KEY = "markdb.ai";
 /* จำนวนแถวต่อหน้า — ใส่เป็น limit ใน SQL ที่ดับเบิลคลิกเปิดตาราง แล้วปรับได้จากแถบล่าง */
@@ -881,6 +886,9 @@ function SyncModal({
   const [src, setSrc] = useState(first);
   const [dst, setDst] = useState(() => conns.find((c) => c.id !== first)?.id ?? "");
   const [sel, setSel] = useState<string[]>(picked ? [tid(picked)] : []);
+  /** คอลัมน์ที่เลือกต่อตาราง — ไม่มี key = ทุกคอลัมน์ */
+  const [cols, setCols] = useState<Record<string, string[]>>({});
+  const [openC, setOpenC] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [del, setDel] = useState(true);
   const [plans, setPlans] = useState<SyncPlan[] | null>(null);
@@ -893,7 +901,16 @@ function SyncModal({
   const name = (id: string) => conns.find((c) => c.id === id)?.name ?? id;
   const tables = (live[src]?.tables ?? []).filter((t) => t.kind === "table");
   const list = tables.filter((t) => tid(t).toLowerCase().includes(filter.toLowerCase()));
-  const chosen = tables.filter((t) => sel.includes(tid(t)));
+  const chosen = tables
+    .filter((t) => sel.includes(tid(t)))
+    .map((t) => ({ schema: t.schema, name: t.name, cols: cols[tid(t)] ?? [] }));
+  const colsOf = (t: { schema: string; name: string }) =>
+    (live[src]?.cols ?? []).filter(([s, n]) => s === t.schema && n === t.name).map(([, , c]) => c);
+  // เลือกครบทุกคอลัมน์ = ลบ key ทิ้ง กลับไปเป็น "ทุกคอลัมน์" (คอลัมน์ที่เพิ่มทีหลังจะติดไปด้วย)
+  const pickCols = (id: string, all: string[], next: string[]) => {
+    const { [id]: _, ...rest } = cols;
+    setCols(next.length === all.length ? rest : { ...rest, [id]: all.filter((c) => next.includes(c)) });
+  };
   const go = (plans ?? []).filter((p) => !p.error && (p.diffs.length === 0 || alter.includes(tid(p))));
   const sum = (k: "add" | "change" | "del") => go.reduce((n, p) => n + p[k], 0);
   const toggle = (id: string) => setSel(sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id]);
@@ -961,6 +978,7 @@ function SyncModal({
               const v = e.target.value;
               setSrc(v);
               setSel([]);
+              setCols({});
               if (v === dst) setDst(conns.find((c) => c.id !== v)?.id ?? "");
             }}
           >
@@ -1064,6 +1082,7 @@ function SyncModal({
                       <CaretRight size={11} className={open ? "caret open" : "caret"} />
                       <b>{p.name}</b>
                       {p.schema !== "public" && <em>{p.schema}</em>}
+                      {cols[id] && <em>เฉพาะ {cols[id].join(", ")}</em>}
                       <span className="syncstat">
                         {p.error ? (
                           <span className="badc">ข้าม — {p.error}</span>
@@ -1169,13 +1188,53 @@ function SyncModal({
                 />
                 เลือกทั้งหมด ({list.length})
               </label>
-              {list.map((t) => (
-                <label className="check syncrow" key={tid(t)}>
-                  <input type="checkbox" checked={sel.includes(tid(t))} onChange={() => toggle(tid(t))} />
-                  {t.name}
-                  {t.schema !== "public" && <em>{t.schema}</em>}
-                </label>
-              ))}
+              {list.map((t) => {
+                const id = tid(t);
+                const all = colsOf(t);
+                const mine = cols[id] ?? all;
+                return (
+                  <div key={id}>
+                    <div className="syncrow">
+                      <label className="check">
+                        <input type="checkbox" checked={sel.includes(id)} onChange={() => toggle(id)} />
+                        {t.name}
+                        {t.schema !== "public" && <em>{t.schema}</em>}
+                      </label>
+                      {sel.includes(id) && all.length > 0 && (
+                        <button
+                          className={"synccolbtn" + (cols[id] ? " on" : "")}
+                          onClick={() => setOpenC(openC === id ? null : id)}
+                        >
+                          {cols[id] ? `${mine.length}/${all.length} คอลัมน์` : "ทุกคอลัมน์"}
+                          <CaretRight size={10} className={openC === id ? "caret open" : "caret"} />
+                        </button>
+                      )}
+                    </div>
+                    {sel.includes(id) && openC === id && (
+                      <div className="synccols">
+                        <p className="csvskip">
+                          เทียบและเขียนแค่คอลัมน์ที่เลือก + primary key · คอลัมน์อื่นในปลายทางไม่ถูกแตะ · แถวใหม่ได้ค่า
+                          default ในคอลัมน์ที่ไม่ได้เลือก
+                        </p>
+                        {all.map((c) => (
+                          <label className="check" key={c}>
+                            <input
+                              type="checkbox"
+                              checked={mine.includes(c)}
+                              // ต้องเหลืออย่างน้อยหนึ่ง — ว่างแปลว่า "ทุกคอลัมน์" ฝั่ง backend
+                              disabled={mine.length === 1 && mine[0] === c}
+                              onChange={() =>
+                                pickCols(id, all, mine.includes(c) ? mine.filter((x) => x !== c) : [...mine, c])
+                              }
+                            />
+                            {c}
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </>
         )}
@@ -1350,6 +1409,7 @@ const Grid = memo(function Grid({
   onInsert,
   onFilter,
   onPasteCells,
+  onCell,
 }: {
   res: QueryResult;
   pk: string[];
@@ -1374,6 +1434,8 @@ const Grid = memo(function Grid({
   onFilter?: (col: string, op: FilterOp, v: unknown) => void;
   /** วางจาก Excel ทับ cell ที่คลุม — value null = NULL, cut = จำนวนช่องที่เกินขอบตาราง */
   onPasteCells?: (changes: { ri: number; col: string; value: string | null }[], cut: number) => void;
+  /** cell ที่เคอร์เซอร์อยู่ — ให้แผง Value โชว์ค่าเต็ม */
+  onCell?: (cell: { col: string; v: unknown } | null) => void;
 }) {
   const parent = useRef<HTMLDivElement>(null);
   // cur ชี้ด้วย "ลำดับที่เห็นบนจอ" (index ใน order) ไม่ใช่ index จริงของแถว
@@ -1455,6 +1517,12 @@ const Grid = memo(function Grid({
     setGhost(null);
     setGerr("");
   }, [res.columns]);
+
+  useEffect(() => {
+    const ri = cur ? order[cur.r] : undefined;
+    const col = cur ? cols[cur.c] : undefined;
+    onCell?.(ri !== undefined && col !== undefined ? { col, v: res.rows[ri][col] } : null);
+  }, [cur, order, cols, res.rows, onCell]);
 
   // ปล่อยเมาส์นอกตารางก็ต้องจบการลาก ไม่งั้นค้างคลุมตามเมาส์ต่อ
   useEffect(() => {
@@ -2304,6 +2372,13 @@ export default function App() {
   const [rels, setRels] = useState<Release[] | null>(null);
   const [relErr, setRelErr] = useState("");
   const [gridFilter, setGridFilter] = useState("");
+  /* ช่องค้นหาเหนือผลลัพธ์: search = กรองจากที่โหลดมาแล้ว, query = เติม where แล้วรันใหม่ */
+  const [findMode, setFindMode] = useState<"search" | "query">(() =>
+    localStorage.getItem(FIND_KEY) === "query" ? "query" : "search",
+  );
+  const [qtext, setQtext] = useState("");
+  const [valOpen, setValOpen] = useState(() => localStorage.getItem(VALUE_KEY) === "1");
+  const [cell, setCell] = useState<{ col: string; v: unknown } | null>(null);
   // ประวัติคำสั่งที่เปลี่ยนข้อมูล — อยู่ในเครื่องนี้เท่านั้น ไม่ได้เขียนอะไรลง db
   const [log, setLog] = useState<hist.Entry[]>(hist.load);
   const [logOpen, setLogOpen] = useState(false);
@@ -2523,6 +2598,11 @@ export default function App() {
   }, [tabs, activeTab]);
   // แก้ค่าในฟอร์มเมื่อไร ผลทดสอบเดิมถือว่าใช้ไม่ได้แล้ว
   useEffect(() => setTest(null), [form?.host, form?.port, form?.user, form?.pass, form?.db, form?.ssl, form?.url]);
+
+  useEffect(() => localStorage.setItem(FIND_KEY, findMode), [findMode]);
+  useEffect(() => localStorage.setItem(VALUE_KEY, valOpen ? "1" : ""), [valOpen]);
+  // สลับแท็บแล้วช่อง Query โชว์ตัวกรองของแท็บนั้น
+  useEffect(() => setQtext(tab?.qf?.expr ?? ""), [tab?.id]);
 
   const say = useCallback((m: string) => {
     setToast(m);
@@ -3524,6 +3604,26 @@ export default function App() {
   /* คลิกขวา cell → กรอง: เติมเงื่อนไขเข้า where ของคำสั่งที่เพิ่งรัน แล้วรันใหม่ */
   const filterBy = (col: string, op: FilterOp, v: unknown) =>
     tab?.ran && rerunSql(addWhere(tab.ran, filterCond(col, op, v, tabDialect)));
+  /* ช่อง Query: เติม where จากที่พิมพ์ (เช่น key = '123') แล้วรันใหม่
+     เริ่มจาก SQL ก่อนกรองทุกครั้ง พิมพ์ใหม่จึงแทนตัวกรองเดิม ไม่ซ้อน and ไปเรื่อย ๆ
+     รอบก่อน error ก็ยังรู้ base เพราะเทียบกับ failed ด้วย */
+  const qfLive = !!tab?.qf && (tab.ran === tab.qf.sql || tab.failed === tab.qf.sql);
+  const canWhere = !!tail || (qfLive && !!tab?.err);
+  const applyWhere = (input: string) => {
+    if (!tab) return;
+    const base = qfLive ? tab.qf!.base : tab.ran;
+    if (!base) return;
+    const expr = input.trim();
+    const next = expr ? addWhere(base, `(${expr})`) : base;
+    if (!next) return say("คำสั่งนี้เติม where ไม่ได้");
+    // รอบก่อน error ใน editor จะเป็นตัวที่ error — แทนตัวนั้น ไม่งั้นแทนตัวที่รันสำเร็จ
+    const shown = [tab.failed, tab.ran].find((x) => x && tab.sql.includes(x));
+    patch(tab.id, {
+      qf: expr ? { base, sql: next.trim(), expr } : undefined,
+      ...(shown ? { sql: tab.sql.replace(shown, () => next) } : {}),
+    });
+    run(tab.id, next);
+  };
 
   /* ดาวจาก editor — เก็บทั้ง editor ของแท็บนี้ (Ctrl+S) */
   const starNow = () => {
@@ -3957,19 +4057,6 @@ export default function App() {
               <ChartBar size={14} weight="duotone" /> Chart
             </button>
           </div>
-          <div className="filterbox">
-            <MagnifyingGlass size={13} />
-            <input
-              placeholder="กรองในผลลัพธ์"
-              value={gridFilter}
-              onChange={(e) => setGridFilter(e.target.value)}
-            />
-            {gridFilter && (
-              <button onClick={() => setGridFilter("")} title="ล้าง">
-                <X size={11} weight="bold" />
-              </button>
-            )}
-          </div>
           <div className="spacer" />
           {editable ? (
             <span style={{ color: "var(--dim)", fontSize: 12 }}>
@@ -4097,6 +4184,77 @@ export default function App() {
           </div>
         )}
 
+        {!tab?.plan && (tab?.res?.columns.length || (qfLive && tab?.err)) ? (
+          <div className="findbar">
+            <div className="seg findmode">
+              <button
+                className={findMode === "search" || !canWhere ? "on" : ""}
+                onClick={() => setFindMode("search")}
+                title="ค้นหาคำในผลลัพธ์ที่โหลดมาแล้ว ไม่รันใหม่"
+              >
+                <MagnifyingGlass size={13} /> Search
+              </button>
+              <button
+                className={findMode === "query" && canWhere ? "on" : ""}
+                onClick={() => setFindMode("query")}
+                disabled={!canWhere}
+                title={
+                  canWhere
+                    ? "พิมพ์เงื่อนไข where เช่น key = '123' แล้ว Enter — รันใหม่ที่ database"
+                    : "ใช้ได้กับผลลัพธ์จาก SELECT ที่แบ่งหน้าได้"
+                }
+              >
+                <Funnel size={13} /> Query
+              </button>
+            </div>
+            {findMode === "query" && canWhere ? (
+              <div className={"filterbox wide where" + (qfLive ? " on" : "")}>
+                <span className="wherekw">WHERE</span>
+                <input
+                  value={qtext}
+                  spellCheck={false}
+                  placeholder="key = '123' and status = 'ACTIVE' — กด Enter เพื่อกรอง"
+                  onChange={(e) => setQtext(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !tab?.running) applyWhere(qtext);
+                  }}
+                />
+                {(qtext || qfLive) && (
+                  <button
+                    onClick={() => {
+                      setQtext("");
+                      if (qfLive) applyWhere("");
+                    }}
+                    title="ล้างตัวกรอง แล้วรันคำสั่งเดิม"
+                  >
+                    <X size={11} weight="bold" />
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="filterbox wide">
+                <input
+                  placeholder="ค้นหาในผลลัพธ์ที่โหลดมาแล้ว (ทุกคอลัมน์)"
+                  value={gridFilter}
+                  onChange={(e) => setGridFilter(e.target.value)}
+                />
+                {gridFilter && (
+                  <button onClick={() => setGridFilter("")} title="ล้าง">
+                    <X size={11} weight="bold" />
+                  </button>
+                )}
+              </div>
+            )}
+            <button
+              className={"btn sm" + (valOpen ? " on" : "")}
+              onClick={() => setValOpen((o) => !o)}
+              title="แผงดูค่าเต็มของ cell ที่เลือก — JSON จัดรูปให้"
+            >
+              <BracketsCurly size={14} weight="duotone" /> Value
+            </button>
+          </div>
+        ) : null}
+
         {tab?.plan && !tab.running && !tab.err ? (
           <ExplainView
             plan={tab.plan}
@@ -4153,6 +4311,7 @@ export default function App() {
         ) : tab?.res && mode === "chart" ? (
           <ChartView res={tab.res} />
         ) : tab?.res ? (
+          <div className="resrow">
           <Grid
             res={tab.res}
             pk={rowKey ?? []}
@@ -4173,7 +4332,19 @@ export default function App() {
               navigator.clipboard?.writeText(txt);
               say("คัดลอกแล้ว");
             }}
+            onCell={setCell}
           />
+          {valOpen && (
+            <ValueView
+              cell={cell}
+              onClose={() => setValOpen(false)}
+              onCopy={(txt) => {
+                navigator.clipboard?.writeText(txt);
+                say("คัดลอกแล้ว");
+              }}
+            />
+          )}
+          </div>
         ) : (
           <div className="result">
             <div className="empty">
