@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -19,6 +19,7 @@ import { ExplainView, type Plan } from "./ExplainView";
 import { SessionsView } from "./SessionsView";
 import { ChartView } from "./ChartView";
 import { ValueView } from "./ValueView";
+import { shortType, typeKind } from "./coltype";
 import { chime } from "./chime";
 import * as hist from "./history";
 import { PostgreSQL, sql as sqlLang } from "@codemirror/lang-sql";
@@ -70,6 +71,7 @@ import {
   CaretLeft,
   CaretRight,
   CaretUp,
+  CaretDown,
   Rows,
   Copy as CopyIcon,
   Eraser,
@@ -1411,6 +1413,7 @@ const Grid = memo(function Grid({
   onFilter,
   onPasteCells,
   onCell,
+  types,
 }: {
   res: QueryResult;
   pk: string[];
@@ -1437,6 +1440,8 @@ const Grid = memo(function Grid({
   onPasteCells?: (changes: { ri: number; col: string; value: string | null }[], cut: number) => void;
   /** cell ที่เคอร์เซอร์อยู่ — ให้แผง Value โชว์ค่าเต็ม */
   onCell?: (cell: { col: string; v: unknown } | null) => void;
+  /** type ของแต่ละคอลัมน์ (รู้เมื่อ query มาจากตารางเดียว) — โชว์ป้ายสีที่หัวคอลัมน์ */
+  types?: Record<string, string>;
 }) {
   const parent = useRef<HTMLDivElement>(null);
   // cur ชี้ด้วย "ลำดับที่เห็นบนจอ" (index ใน order) ไม่ใช่ index จริงของแถว
@@ -1476,11 +1481,11 @@ const Grid = memo(function Grid({
     for (const c of res.columns) {
       const sample = res.rows
         .slice(0, 40)
-        .reduce((w, r) => Math.max(w, cellText(r[c]).length), c.length);
+        .reduce((w, r) => Math.max(w, cellText(r[c]).length), c.length + (types?.[c] ? shortType(types[c]).length + 2 : 0));
       m[c] = Math.min(440, Math.max(88, sample * 7.4 + 28));
     }
     return m;
-  }, [res]);
+  }, [res, types]);
   const widths = useMemo(() => cols.map((c) => widthOf[c]), [cols, widthOf]);
   const template = useMemo(() => widths.map((w) => `${w}px`).join(" "), [widths]);
 
@@ -2076,7 +2081,7 @@ Tab = เติมค่าที่แนะนำ · Enter = บันทึ�
                 (colDrag?.col === c ? " dragging" : "") +
                 (colDrag?.over === c ? " dropto" : "")
               }
-              title={`${c} — คลิก = เรียงในหน้านี้ · ลาก = ย้ายคอลัมน์ · คลิกขวา = order by และอื่น ๆ`}
+              title={`${c}${types?.[c] ? ` · ${types[c]}` : ""} — คลิก = เรียงในหน้านี้ · ลาก = ย้ายคอลัมน์ · คลิกขวา = order by และอื่น ๆ`}
               onMouseDown={(e) => {
                 if (e.button === 0) colDown.current = { col: c, x: e.clientX };
               }}
@@ -2087,6 +2092,7 @@ Tab = เติมค่าที่แนะนำ · Enter = บันทึ�
               }}
             >
               {pk.includes(c) ? `🔑 ${c}` : c}
+              {types?.[c] && <b className={"htype t-" + typeKind(types[c])}>{shortType(types[c])}</b>}
               {sort?.col === c ? (
                 <i>{sort.dir === "asc" ? "▲" : "▼"}</i>
               ) : (
@@ -2350,6 +2356,10 @@ export default function App() {
   const [connErr, setConnErr] = useState<Record<string, string>>({});
   const [filter, setFilter] = useState("");
   const [picked, setPicked] = useState<TableInfo | null>(null);
+  /** ตารางใน sidebar ที่กางดูคอลัมน์อยู่ (schema.name) */
+  const [openTbl, setOpenTbl] = useState<Set<string>>(() => new Set());
+  /** เมนู Close options: id แท็บที่ติ๊กไว้ + ตำแหน่งเมนู */
+  const [closeSel, setCloseSel] = useState<{ ids: Set<string>; x: number; y: number } | null>(null);
   const [tabs, setTabs] = useState<Tab[]>(BOOT.tabs);
   const [activeTab, setActiveTab] = useState<string>(BOOT.active);
   const [editorH, setEditorH] = useState(230);
@@ -2476,6 +2486,13 @@ export default function App() {
   }, [tab?.sql, live, tabConn, tabDialect]);
 
   const keyId = target ? `${tabConn}::${target}` : "";
+  /* type ของคอลัมน์ในตารางเป้าหมาย จาก meta ที่โหลดไว้แล้วตอนเชื่อมต่อ — ไม่ต้องยิง query เพิ่ม */
+  const colTypes = useMemo(() => {
+    const m = live[tabConn];
+    const t = target && m?.tables.find((x) => qname(x) === target);
+    if (!t) return undefined;
+    return Object.fromEntries(m.cols.filter(([s, n]) => s === t.schema && n === t.name).map(([, , c, ty]) => [c, ty]));
+  }, [live, tabConn, target]);
   const rowKey = keyId ? keys[keyId] : null;
 
   useEffect(() => {
@@ -3102,6 +3119,19 @@ export default function App() {
     setTabs([nt]);
     setActiveTab(nt.id);
   }, [activeConn]);
+
+  /* ปิดหลายแท็บทีเดียวจากเมนู Close options — ปิดหมดก็เหลือแท็บว่างไว้หนึ่งอันเหมือน Close all */
+  const closeTabs = useCallback(
+    (ids: Set<string>) => {
+      setTabs((ts) => {
+        const left = ts.filter((t) => !ids.has(t.id));
+        const next = left.length ? left : [newTab(activeConn)];
+        setActiveTab((a) => (next.some((t) => t.id === a) ? a : next[next.length - 1].id));
+        return next;
+      });
+    },
+    [activeConn],
+  );
 
   /* แชร์รายการ connection ให้คนในทีม — ไฟล์ไม่มี password, คนรับใส่เอง */
   const exportConns = useCallback(async () => {
@@ -3860,9 +3890,12 @@ export default function App() {
         </div>
 
         <div className="tables">
-          {shown.map((t) => (
+          {shown.map((t) => {
+            const id = `${t.schema}.${t.name}`;
+            const isOpen = openTbl.has(id);
+            return (
+            <Fragment key={id}>
             <div
-              key={t.schema + t.name}
               className={
                 "tbl" + (picked?.name === t.name && picked?.schema === t.schema ? " on" : "")
               }
@@ -3875,6 +3908,22 @@ export default function App() {
                 setTblMenu({ x: e.clientX, y: e.clientY, t });
               }}
             >
+              <button
+                className="tblcaret"
+                title={isOpen ? "ซ่อนคอลัมน์" : "ดูคอลัมน์และ type"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setOpenTbl((o) => {
+                    const n = new Set(o);
+                    if (n.has(id)) n.delete(id);
+                    else n.add(id);
+                    return n;
+                  });
+                }}
+                onDoubleClick={(e) => e.stopPropagation()}
+              >
+                <CaretRight size={10} weight="bold" className={isOpen ? "caret open" : "caret"} />
+              </button>
               {t.kind === "view" ? (
                 <Eye size={15} weight="duotone" />
               ) : t.kind === "foreign" ? (
@@ -3885,7 +3934,21 @@ export default function App() {
               <span>{t.name}</span>
               {t.schema !== "public" && <em>{t.schema}</em>}
             </div>
-          ))}
+            {isOpen && (
+              <div className="tblcols">
+                {(live[activeConn]?.cols ?? [])
+                  .filter(([s, n]) => s === t.schema && n === t.name)
+                  .map(([, , c, ty]) => (
+                    <div key={c} className="tblcol" title={`${c} · ${ty}`}>
+                      <span>{c}</span>
+                      <b className={"htype t-" + typeKind(ty)}>{shortType(ty)}</b>
+                    </div>
+                  ))}
+              </div>
+            )}
+            </Fragment>
+            );
+          })}
         </div>
 
         <div className="side-foot">
@@ -3930,13 +3993,87 @@ export default function App() {
       <main className={"main" + (tabInfo?.prod ? " prod" : "")}>
         <div className="tabbar">
           <button
-            className="btn sm"
-            onClick={closeAll}
+            className={"btn sm" + (closeSel ? " on" : "")}
+            onClick={(e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              setCloseSel(closeSel ? null : { ids: new Set(), x: r.left, y: r.bottom + 6 });
+            }}
             disabled={tabs.length === 1 && !tabs[0].sql}
-            title="ปิดแท็บ query ทั้งหมด"
+            title="เลือกปิดแท็บ query — ทั้งหมด หรือเฉพาะบางอัน"
           >
-            <X size={14} weight="bold" /> Close all
+            <X size={14} weight="bold" /> Close options
+            <CaretDown size={11} weight="bold" />
           </button>
+          {closeSel && (
+            <>
+              <div className="ctx-backdrop" onMouseDown={() => setCloseSel(null)} />
+              <div className="closemenu" style={{ left: closeSel.x, top: closeSel.y }}>
+                <div className="closehead">
+                  <b>เลือกแท็บที่จะปิด</b>
+                  <button
+                    className="btn ghost sm"
+                    onClick={() => setCloseSel({ ...closeSel, ids: new Set(tabs.map((t) => t.id)) })}
+                  >
+                    เลือกทั้งหมด
+                  </button>
+                  <button className="btn ghost sm" onClick={() => setCloseSel({ ...closeSel, ids: new Set() })}>
+                    เอาออกทั้งหมด
+                  </button>
+                </div>
+                <div className="closelist">
+                  {tabs.map((t) => (
+                    <label key={t.id} className={"check" + (t.id === tab?.id ? " cur" : "")}>
+                      <input
+                        type="checkbox"
+                        checked={closeSel.ids.has(t.id)}
+                        onChange={() => {
+                          const ids = new Set(closeSel.ids);
+                          if (ids.has(t.id)) ids.delete(t.id);
+                          else ids.add(t.id);
+                          setCloseSel({ ...closeSel, ids });
+                        }}
+                      />
+                      <span>{t.title}</span>
+                      {t.id === tab?.id && <em>แท็บนี้</em>}
+                      {t.running && <em>กำลังรัน</em>}
+                    </label>
+                  ))}
+                </div>
+                <div className="closefoot">
+                  <button
+                    className="btn sm"
+                    disabled={tabs.length < 2}
+                    onClick={() => {
+                      closeTabs(new Set(tabs.filter((t) => t.id !== tab?.id).map((t) => t.id)));
+                      setCloseSel(null);
+                    }}
+                    title="เก็บไว้แค่แท็บที่เปิดอยู่"
+                  >
+                    ปิดอื่น ๆ
+                  </button>
+                  <button
+                    className="btn sm"
+                    onClick={() => {
+                      closeAll();
+                      setCloseSel(null);
+                    }}
+                  >
+                    Close all
+                  </button>
+                  <button
+                    className="btn primary sm"
+                    disabled={!closeSel.ids.size}
+                    onClick={() => {
+                      closeTabs(closeSel.ids);
+                      setCloseSel(null);
+                    }}
+                  >
+                    ปิดที่เลือก ({closeSel.ids.size})
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
           {/* แท็บเยอะเกินจอ: หมุนลูกกลิ้งเลื่อนซ้าย-ขวาได้ */}
           <div className="tabscroll" ref={tabScroll} onWheel={(e) => (e.currentTarget.scrollLeft += e.deltaY || e.deltaX)}>
           {tabs.map((t) => (
@@ -4340,6 +4477,7 @@ export default function App() {
             serverOrder={tail?.order}
             dialect={tabDialect}
             newCols={editable && tcols[keyId]?.length ? tcols[keyId] : undefined}
+            types={colTypes}
             onInsert={insertNew}
             onCopy={(txt) => {
               navigator.clipboard?.writeText(txt);

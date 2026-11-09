@@ -436,7 +436,7 @@ select:focus {
   background: var(--bg-2);
 }
 
-/* แท็บ query เลื่อนแนวนอนเองในกล่องนี้ — Close all / New Query อยู่นิ่งสองข้าง */
+/* แท็บ query เลื่อนแนวนอนเองในกล่องนี้ — Close options / New Query อยู่นิ่งสองข้าง */
 .tabscroll {
   display: flex;
   align-items: center;
@@ -3502,4 +3502,156 @@ div.syncrow .check {
   .upnotice {
     animation: none;
   }
+}
+
+/* ป้าย type ของคอลัมน์ — สีตามกลุ่ม: ตัวเลข / ข้อความ / วันเวลา / bool / json */
+.htype {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font: 500 10px/15px "JetBrains Mono", Consolas, monospace;
+  letter-spacing: 0;
+  text-transform: none;
+  vertical-align: 1px;
+  color: var(--dim);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+}
+
+.htype.t-num { color: var(--sky); border-color: color-mix(in srgb, var(--sky) 35%, transparent); }
+.htype.t-text { color: var(--green); border-color: color-mix(in srgb, var(--green) 35%, transparent); }
+.htype.t-time { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 35%, transparent); }
+.htype.t-bool { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 35%, transparent); }
+.htype.t-json { color: var(--red); border-color: color-mix(in srgb, var(--red) 35%, transparent); }
+
+/* sidebar: กางตารางดูคอลัมน์ */
+.tblcaret {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin: 0 -4px 0 -6px;
+  border-radius: 4px;
+  color: var(--dim);
+  cursor: pointer;
+  flex: none;
+}
+
+.tblcaret:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.tblcaret .caret {
+  transition: transform 0.15s;
+}
+
+.tblcaret .caret.open {
+  transform: rotate(90deg);
+}
+
+.tblcols {
+  margin: 0 0 4px 22px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
+
+.tblcol {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.tblcol span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tblcol .htype {
+  margin-left: auto;
+  flex: none;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* เมนู Close options */
+.closemenu {
+  position: fixed;
+  z-index: 61;
+  width: 320px;
+  max-width: calc(100vw - 20px);
+  padding: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 34px var(--shadow);
+}
+
+.closehead {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 2px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.closehead b {
+  margin-right: auto;
+  font-size: 12.5px;
+}
+
+.closelist {
+  display: grid;
+  gap: 1px;
+  max-height: 300px;
+  overflow: auto;
+  padding: 6px 0;
+}
+
+.closelist label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.closelist label:hover {
+  background: var(--accent-soft);
+}
+
+.closelist span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.closelist em {
+  margin-left: auto;
+  flex: none;
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--dim);
+}
+
+.closelist em + em {
+  margin-left: 4px;
+}
+
+.closefoot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
 }
