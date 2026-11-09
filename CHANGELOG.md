@@ -2,6 +2,14 @@
 
 All notable changes to MarkDB. Release notes are written in Thai.
 
+## [v0.3.3](https://github.com/thanadon-dev/markdb/releases/tag/v0.3.3) — 2026-11-09
+
+### ใหม่
+
+- **เห็น type ของคอลัมน์ชัดขึ้น** — หัวคอลัมน์ในผลลัพธ์มีป้าย type (integer, varchar(50), timestamp, jsonb ...) แยกสีตามกลุ่ม: ตัวเลข ฟ้า, ข้อความ เขียว, วันเวลา เหลือง, boolean ม่วง, json / array แดง
+- **กางตารางใน sidebar ดูคอลัมน์** — กดลูกศรหน้าชื่อตารางเพื่อดูรายชื่อคอลัมน์พร้อม type ไม่ต้องเปิด query ก่อน
+- **Close options** — ปุ่ม Close all เปลี่ยนเป็นเมนูเลือกปิดแท็บ: ติ๊กเฉพาะแท็บที่จะปิด, เลือกทั้งหมด / เอาออกทั้งหมด, ปิดอื่น ๆ (เหลือแค่แท็บที่เปิดอยู่) หรือ Close all เหมือนเดิม
+
 ## [v0.3.2](https://github.com/thanadon-dev/markdb/releases/tag/v0.3.2) — 2026-11-06
 
 ### ใหม่
