@@ -53,7 +53,7 @@
 - หัวคอลัมน์มีป้าย type แยกสี และ sidebar เป็นต้นไม้ schema → Tables / Views → ตาราง → คอลัมน์พร้อม type
 - รันหลายคำสั่งพร้อมกันแล้วสลับดูผลของแต่ละคำสั่งได้
 - จัดรูป SQL (`Shift+Alt+F`) ตามชนิดของ database
-- AI ช่วยเขียนและแก้ SQL ที่ error ผ่าน [Claude Code](https://claude.com/claude-code) หรือ [Codex CLI](https://github.com/openai/codex) ที่ login ไว้ในเครื่อง เลือก model ของ Claude ได้ทุกรุ่น (ค่าเริ่มต้นคือ Haiku) หรือ model ของ Codex ตัวแอปไม่ต้องเก็บ API key
+- AI ช่วยเขียนและแก้ SQL ที่ error ผ่าน [Claude Code](https://claude.com/claude-code) หรือ [Codex CLI](https://github.com/openai/codex) ที่ login ไว้ในเครื่อง เลือก model ของ Claude ได้ทุกรุ่น (ค่าเริ่มต้นคือ Haiku) หรือ model ของ Codex ได้ทุกรุ่นที่ Codex CLI ในเครื่องรองรับ (อ่านรายชื่อจาก CLI) ตัวแอปไม่ต้องเก็บ API key
 
 **กันพลาด**
 - ติดป้าย Production หรืออ่านอย่างเดียวให้แต่ละ connection ได้ บน Postgres ใช้ read-only transaction บังคับที่ระดับ session

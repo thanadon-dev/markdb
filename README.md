@@ -54,7 +54,7 @@ The installer is under 5 MB. It starts fast and uses little memory, because it r
 - Column headers show each column's type as a colored tag, and the sidebar is a tree (schema, then Tables / Views, then table, then columns with types).
 - Run several statements at once and switch between each statement's result.
 - Format SQL (`Shift+Alt+F`) in the dialect of the connection.
-- AI writes SQL and fixes failing queries through [Claude Code](https://claude.com/claude-code) or [Codex CLI](https://github.com/openai/codex) logged in on your machine. Pick any Claude model (Haiku by default) or a Codex model. The app never stores an API key.
+- AI writes SQL and fixes failing queries through [Claude Code](https://claude.com/claude-code) or [Codex CLI](https://github.com/openai/codex) logged in on your machine. Pick any Claude model (Haiku by default) or any model your installed Codex CLI supports (the list is read from the CLI). The app never stores an API key.
 
 **Safety**
 - Mark a connection as Production or read-only. On Postgres, read-only is enforced per session with read-only transactions.
