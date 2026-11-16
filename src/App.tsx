@@ -62,6 +62,8 @@ import {
   BracketsCurly,
   Confetti,
   Eye,
+  Folder,
+  FolderOpen,
   FloppyDisk,
   Lightning,
   LinkSimple,
@@ -328,6 +330,13 @@ const EngineLogo = ({ engine, size }: { engine: Engine; size?: number }) =>
 const mb = (n: number) => (n / 1_048_576).toFixed(1);
 
 const uid = () => Math.random().toString(36).slice(2, 9);
+/** กลุ่มใต้ schema ใน sidebar — เรียงตามนี้ */
+const GROUPS = [
+  { kind: "table", label: "Tables", icon: TableIcon },
+  { kind: "view", label: "Views", icon: Eye },
+  { kind: "foreign", label: "Foreign tables", icon: LinkSimple },
+];
+
 const qname = (t: TableInfo) => t.q ?? `${quoteIdent(t.schema)}.${quoteIdent(t.name)}`;
 
 const Close = ({ on }: { on: () => void }) => (
@@ -2356,8 +2365,8 @@ export default function App() {
   const [connErr, setConnErr] = useState<Record<string, string>>({});
   const [filter, setFilter] = useState("");
   const [picked, setPicked] = useState<TableInfo | null>(null);
-  /** ตารางใน sidebar ที่กางดูคอลัมน์อยู่ (schema.name) */
-  const [openTbl, setOpenTbl] = useState<Set<string>>(() => new Set());
+  /** โหนดใน sidebar ที่ผู้ใช้กด กาง/หุบ สลับจากค่าตั้งต้น — schema: / grp: / tbl: */
+  const [flip, setFlip] = useState<Set<string>>(() => new Set());
   /** เมนู Close options: id แท็บที่ติ๊กไว้ + ตำแหน่งเมนู */
   const [closeSel, setCloseSel] = useState<{ ids: Set<string>; x: number; y: number } | null>(null);
   const [tabs, setTabs] = useState<Tab[]>(BOOT.tabs);
@@ -3573,6 +3582,26 @@ export default function App() {
     return f ? tables.filter((t) => t.name.toLowerCase().includes(f)) : tables;
   }, [tables, filter]);
 
+  /* sidebar แบบต้นไม้: schema → Tables / Views / Foreign → ตาราง → คอลัมน์ */
+  const tree = useMemo(() => {
+    const by = new Map<string, Record<string, TableInfo[]>>();
+    for (const t of shown) {
+      const g = by.get(t.schema) ?? {};
+      (g[t.kind] ??= []).push(t);
+      by.set(t.schema, g);
+    }
+    return [...by];
+  }, [shown]);
+  // ค่าตั้งต้น: มี schema เดียวกางให้เลย, กลุ่ม Tables กางไว้, ตอนค้นหากางทุกชั้นให้เห็นผล
+  const isOpen = (key: string, def: boolean) => (filter.trim() && !key.startsWith("tbl:")) || def !== flip.has(key);
+  const toggle = (key: string) =>
+    setFlip((o) => {
+      const n = new Set(o);
+      if (n.has(key)) n.delete(key);
+      else n.add(key);
+      return n;
+    });
+
   const ctx = tableInQuery(tab?.sql ?? "");
   const cmExt = useMemo(() => {
     const support = sqlLang({
@@ -3890,63 +3919,82 @@ export default function App() {
         </div>
 
         <div className="tables">
-          {shown.map((t) => {
-            const id = `${t.schema}.${t.name}`;
-            const isOpen = openTbl.has(id);
+          {tree.map(([sch, groups]) => {
+            const sk = `schema:${sch}`;
+            const sOpen = isOpen(sk, tree.length === 1);
+            const n = Object.values(groups).reduce((a, g) => a + g.length, 0);
             return (
-            <Fragment key={id}>
-            <div
-              className={
-                "tbl" + (picked?.name === t.name && picked?.schema === t.schema ? " on" : "")
-              }
-              title={`${t.schema}.${t.name} — ดับเบิลคลิก = SELECT, คลิกขวา = เมนู`}
-              onClick={() => setPicked(t)}
-              onDoubleClick={() => openTable(t)}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                setPicked(t);
-                setTblMenu({ x: e.clientX, y: e.clientY, t });
-              }}
-            >
-              <button
-                className="tblcaret"
-                title={isOpen ? "ซ่อนคอลัมน์" : "ดูคอลัมน์และ type"}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setOpenTbl((o) => {
-                    const n = new Set(o);
-                    if (n.has(id)) n.delete(id);
-                    else n.add(id);
-                    return n;
-                  });
-                }}
-                onDoubleClick={(e) => e.stopPropagation()}
-              >
-                <CaretRight size={10} weight="bold" className={isOpen ? "caret open" : "caret"} />
-              </button>
-              {t.kind === "view" ? (
-                <Eye size={15} weight="duotone" />
-              ) : t.kind === "foreign" ? (
-                <LinkSimple size={15} weight="duotone" />
-              ) : (
-                <TableIcon size={15} weight="duotone" />
-              )}
-              <span>{t.name}</span>
-              {t.schema !== "public" && <em>{t.schema}</em>}
-            </div>
-            {isOpen && (
-              <div className="tblcols">
-                {(live[activeConn]?.cols ?? [])
-                  .filter(([s, n]) => s === t.schema && n === t.name)
-                  .map(([, , c, ty]) => (
-                    <div key={c} className="tblcol" title={`${c} · ${ty}`}>
-                      <span>{c}</span>
-                      <b className={"htype t-" + typeKind(ty)}>{shortType(ty)}</b>
-                    </div>
-                  ))}
-              </div>
-            )}
-            </Fragment>
+              <Fragment key={sk}>
+                <div className="tnode schema" onClick={() => toggle(sk)} title={`schema ${sch}`}>
+                  <CaretRight size={10} weight="bold" className={sOpen ? "caret open" : "caret"} />
+                  {sOpen ? <FolderOpen size={15} weight="duotone" /> : <Folder size={15} weight="duotone" />}
+                  <span>{sch}</span>
+                  <em>{n}</em>
+                </div>
+                {sOpen &&
+                  GROUPS.filter((g) => groups[g.kind]).map((g) => {
+                    const gk = `grp:${sch}:${g.kind}`;
+                    const gOpen = isOpen(gk, g.kind === "table");
+                    return (
+                      <Fragment key={gk}>
+                        <div className={"tnode grp k-" + g.kind} onClick={() => toggle(gk)}>
+                          <CaretRight size={10} weight="bold" className={gOpen ? "caret open" : "caret"} />
+                          <g.icon size={15} weight="duotone" />
+                          <span>{g.label}</span>
+                          <em>{groups[g.kind].length}</em>
+                        </div>
+                        {gOpen &&
+                          groups[g.kind].map((t) => {
+                            const tk = `tbl:${sch}.${t.name}`;
+                            const tOpen = isOpen(tk, false);
+                            return (
+                              <Fragment key={tk}>
+                                <div
+                                  className={
+                                    "tbl k-" + g.kind + (picked?.name === t.name && picked?.schema === t.schema ? " on" : "")
+                                  }
+                                  title={`${t.schema}.${t.name} — ดับเบิลคลิก = SELECT, คลิกขวา = เมนู`}
+                                  onClick={() => setPicked(t)}
+                                  onDoubleClick={() => openTable(t)}
+                                  onContextMenu={(e) => {
+                                    e.preventDefault();
+                                    setPicked(t);
+                                    setTblMenu({ x: e.clientX, y: e.clientY, t });
+                                  }}
+                                >
+                                  <button
+                                    className="tblcaret"
+                                    title={tOpen ? "ซ่อนคอลัมน์" : "ดูคอลัมน์และ type"}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      toggle(tk);
+                                    }}
+                                    onDoubleClick={(e) => e.stopPropagation()}
+                                  >
+                                    <CaretRight size={10} weight="bold" className={tOpen ? "caret open" : "caret"} />
+                                  </button>
+                                  <g.icon size={15} weight="duotone" />
+                                  <span>{t.name}</span>
+                                </div>
+                                {tOpen && (
+                                  <div className="tblcols">
+                                    {(live[activeConn]?.cols ?? [])
+                                      .filter(([s, n]) => s === t.schema && n === t.name)
+                                      .map(([, , c, ty]) => (
+                                        <div key={c} className="tblcol" title={`${c} · ${ty}`}>
+                                          <span>{c}</span>
+                                          <b className={"htype t-" + typeKind(ty)}>{shortType(ty)}</b>
+                                        </div>
+                                      ))}
+                                  </div>
+                                )}
+                              </Fragment>
+                            );
+                          })}
+                      </Fragment>
+                    );
+                  })}
+              </Fragment>
             );
           })}
         </div>

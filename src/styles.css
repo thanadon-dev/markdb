@@ -3655,3 +3655,85 @@ div.syncrow .check {
   padding-top: 8px;
   border-top: 1px solid var(--border);
 }
+
+/* sidebar ต้นไม้: schema (เหลือง) → กลุ่ม → ตาราง (เขียว) / view (ม่วง) / foreign (ฟ้า) */
+.tnode {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--text);
+}
+
+.tnode:hover {
+  background: var(--panel);
+}
+
+.tnode span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tnode em {
+  margin-left: auto;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--panel-2);
+  color: var(--dim);
+  font-style: normal;
+  font-size: 10.5px;
+}
+
+.tnode .caret,
+.tblcaret .caret {
+  color: var(--dim);
+  transition: transform 0.15s;
+}
+
+.tnode .caret.open {
+  transform: rotate(90deg);
+}
+
+.tnode.schema {
+  font-weight: 600;
+}
+
+.tnode.schema svg:not(.caret) {
+  color: var(--yellow);
+}
+
+.tnode.grp {
+  padding-left: 22px;
+  font-size: 12.5px;
+}
+
+.tnode.grp span {
+  color: var(--dim);
+}
+
+.tables .tbl {
+  padding-left: 34px;
+}
+
+.tnode.k-table svg:not(.caret),
+.tbl.k-table > svg {
+  color: var(--green);
+}
+
+.tnode.k-view svg:not(.caret),
+.tbl.k-view > svg {
+  color: var(--violet);
+}
+
+.tnode.k-foreign svg:not(.caret),
+.tbl.k-foreign > svg {
+  color: var(--sky);
+}
+
+.tables .tblcols {
+  margin-left: 50px;
+}
