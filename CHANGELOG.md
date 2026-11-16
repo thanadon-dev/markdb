@@ -2,6 +2,13 @@
 
 All notable changes to MarkDB. Release notes are written in Thai.
 
+## [v0.3.4](https://github.com/thanadon-dev/markdb/releases/tag/v0.3.4) — 2026-11-16
+
+### ใหม่
+
+- **Sidebar แบบต้นไม้** — ตารางจัดเป็นชั้นเหมือน DBeaver: schema → Tables / Views → ตาราง → คอลัมน์พร้อม type กดลูกศรกาง/หุบได้ทีละชั้น บอกจำนวนในแต่ละชั้น ค้นหาตารางแล้วกางให้เห็นผลเอง
+- **สีแยกชนิดให้ดูง่าย** — schema สีเหลือง, ตาราง สีเขียว, view สีม่วง, foreign table สีฟ้า ทั้งธีมมืดและสว่าง
+
 ## [v0.3.3](https://github.com/thanadon-dev/markdb/releases/tag/v0.3.3) — 2026-11-09
 
 ### ใหม่
