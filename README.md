@@ -51,7 +51,7 @@ The installer is under 5 MB. It starts fast and uses little memory, because it r
 - Right-click a cell to filter by it (equals, not equals, contains, is NULL). Paginate, or order by from the column header.
 - A search bar above the results with two modes: Search finds text in the loaded rows, Query takes a `where` condition such as `key = '123'` and runs the query again.
 - A Value panel shows the full value of the selected cell, with JSON formatted and colored.
-- Column headers show each column's type as a colored tag, and tables in the sidebar expand to list their columns and types.
+- Column headers show each column's type as a colored tag, and the sidebar is a tree (schema, then Tables / Views, then table, then columns with types).
 - Run several statements at once and switch between each statement's result.
 - Format SQL (`Shift+Alt+F`) in the dialect of the connection.
 - AI writes SQL and fixes failing queries through [Claude Code](https://claude.com/claude-code) or [Codex CLI](https://github.com/openai/codex) logged in on your machine. Pick any Claude model (Haiku by default) or a Codex model. The app never stores an API key.
