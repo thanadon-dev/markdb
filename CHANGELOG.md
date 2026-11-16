@@ -2,6 +2,17 @@
 
 All notable changes to MarkDB. Release notes are written in Thai.
 
+## [v0.3.5](https://github.com/thanadon-dev/markdb/releases/tag/v0.3.5) — 2026-11-16
+
+### ใหม่
+
+- **AI ใช้ Codex ได้ทุกโมเดล** — รายชื่อโมเดล Codex อ่านจาก Codex CLI ในเครื่องตอนเปิดแอป โมเดลไหนที่ Codex ของเรารองรับก็เลือกได้หมด OpenAI ออกรุ่นใหม่ก็ขึ้นเองหลังอัปเดต Codex ไม่ต้องรอ MarkDB เวอร์ชันใหม่
+- **พับ Connections ได้** — ตั้งต้นพับไว้ เหลือแค่ connection ที่ใช้อยู่ sidebar มีที่ให้รายการตารางยาวขึ้น คลิกหัวข้อ CONNECTIONS เพื่อกาง/พับ แอปจำค่าไว้
+
+### ปรับปรุง
+
+- ข้อความวิธีแก้ cell บนแถบเครื่องมือสั้นลง เหลือ "เลือก cell แล้วพิมพ์เพื่อแก้ · Esc ยกเลิก" ชี้เมาส์ค้างดูวิธีใช้เต็มได้
+
 ## [v0.3.4](https://github.com/thanadon-dev/markdb/releases/tag/v0.3.4) — 2026-11-16
 
 ### ใหม่
