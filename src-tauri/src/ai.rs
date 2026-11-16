@@ -67,6 +67,52 @@ fn parse_codex(line: &str) -> Line {
     }
 }
 
+/// รายชื่อโมเดลจาก `codex debug models` — เอาเฉพาะที่ codex เองโชว์ในตัวเลือก (visibility = list)
+fn parse_models(json: &str) -> Vec<(String, String)> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    v["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["visibility"] == "list")
+        .filter_map(|m| {
+            let id = m["slug"].as_str()?.to_string();
+            let name = m["display_name"].as_str().unwrap_or(&id).to_string();
+            Some((id, name))
+        })
+        .collect()
+}
+
+/// โมเดลทั้งหมดที่ codex CLI ในเครื่องใช้ได้ — ไม่ต้องแก้แอปทุกครั้งที่ OpenAI ออกรุ่นใหม่
+/// ว่าง = ไม่มี codex / อ่านไม่ได้ ให้ UI ใช้รายชื่อที่ฝังไว้แทน
+#[tauri::command]
+pub async fn ai_models() -> R<Vec<(String, String)>> {
+    let run = |prog: &str| {
+        let mut cmd = Command::new(prog);
+        cmd.args(["debug", "models"])
+            .current_dir(std::env::temp_dir())
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000);
+        cmd.output()
+    };
+    // ลงผ่าน npm จะได้ codex.cmd — Command เติมให้แค่ .exe
+    let out = match tokio::time::timeout(std::time::Duration::from_secs(15), run("codex")).await {
+        Ok(Err(e)) if cfg!(windows) && e.kind() == std::io::ErrorKind::NotFound => {
+            tokio::time::timeout(std::time::Duration::from_secs(15), run("codex.cmd")).await
+        }
+        r => r,
+    };
+    match out {
+        Ok(Ok(o)) if o.status.success() => Ok(parse_models(&String::from_utf8_lossy(&o.stdout))),
+        _ => Ok(Vec::new()),
+    }
+}
+
 fn command(prog: &str, codex: bool, model: &str, effort: &str, system: &str) -> Command {
     let mut cmd = Command::new(prog);
     if codex {
@@ -221,5 +267,27 @@ mod tests {
         let plain = r#"{"type":"turn.failed","error":{"message":"stream disconnected"}}"#;
         assert_eq!(parse_codex(plain), Line::Done(Err("stream disconnected".into())));
         assert_eq!(parse_codex(r#"{"type":"turn.completed","usage":{}}"#), Line::Other);
+    }
+
+    #[test]
+    fn codex_model_catalog() {
+        let j = r#"{"models":[
+            {"slug":"gpt-reserve","display_name":"GPT-Reserve","visibility":"hide"},
+            {"slug":"gpt-5.6-terra","display_name":"GPT-5.6-Terra","visibility":"list"},
+            {"slug":"gpt-x","visibility":"list"}]}"#;
+        assert_eq!(
+            parse_models(j),
+            vec![("gpt-5.6-terra".into(), "GPT-5.6-Terra".into()), ("gpt-x".into(), "gpt-x".into())]
+        );
+        assert!(parse_models("not json").is_empty());
+    }
+
+    /// ต้องมี codex CLI ในเครื่อง: cargo test --lib ai_models_real -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn ai_models_real() {
+        let ms = ai_models().await.unwrap();
+        println!("{ms:?}");
+        assert!(!ms.is_empty());
     }
 }

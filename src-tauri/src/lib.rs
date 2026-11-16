@@ -2030,6 +2030,7 @@ pub fn run() {
             sync::sync_plan,
             ai::ai_sql,
             ai::ai_cancel,
+            ai::ai_models,
             sync::sync_apply,
             import_sql,
             backup_database

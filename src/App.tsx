@@ -243,6 +243,7 @@ const sshArg = (c: Conn) =>
 const CONNS_KEY = "markdb.conns";
 const FIND_KEY = "markdb.findMode";
 const VALUE_KEY = "markdb.valuePanel";
+const CONNS_OPEN_KEY = "markdb.connsOpen";
 const TABS_KEY = "markdb.tabs";
 const AI_KEY = "markdb.ai";
 /* จำนวนแถวต่อหน้า — ใส่เป็น limit ใน SQL ที่ดับเบิลคลิกเปิดตาราง แล้วปรับได้จากแถบล่าง */
@@ -451,7 +452,8 @@ const BOOT = loadTabs();
 /* ---------- AI เขียน SQL (ผ่าน claude / codex CLI ของผู้ใช้) ---------- */
 
 type AiPrefs = { model: string; effort: string };
-/* model ที่ไม่ขึ้นต้นด้วย claude- ฝั่ง Rust ส่งให้ codex CLI */
+/* model ที่ไม่ขึ้นต้นด้วย claude- ฝั่ง Rust ส่งให้ codex CLI
+   รายชื่อ Codex จริงอ่านจาก codex CLI ในเครื่องตอนเปิดแอป — ที่ฝังไว้นี้ใช้ตอนอ่านไม่ได้ */
 const AI_MODELS = [
   { cli: "Claude Code", id: "claude-haiku-5-5", name: "Haiku 5.5" },
   { cli: "Claude Code", id: "claude-sonnet-5-5", name: "Sonnet 5.5" },
@@ -467,7 +469,8 @@ const loadAi = (): AiPrefs => {
   try {
     const p = { ...def, ...JSON.parse(localStorage.getItem(AI_KEY) || "{}") };
     // ค่าที่จำไว้เป็นรุ่นที่เลิกใช้แล้ว (เช่น claude-sonnet-5) → กลับไปค่าเริ่มต้น
-    return AI_MODELS.some((m) => m.id === p.model) ? p : { ...p, model: def.model };
+    // codex: รุ่นไหนก็เก็บไว้ (รายชื่อมาจากเครื่องผู้ใช้) — ตรวจเฉพาะ claude ที่ฝังรายชื่อไว้
+    return !p.model.startsWith("claude") || AI_MODELS.some((m) => m.id === p.model) ? p : { ...p, model: def.model };
   } catch {
     return def;
   }
@@ -2401,6 +2404,8 @@ export default function App() {
   );
   const [qtext, setQtext] = useState("");
   const [valOpen, setValOpen] = useState(() => localStorage.getItem(VALUE_KEY) === "1");
+  /** ส่วน connections กางอยู่ไหม — ตั้งต้นพับไว้ ให้ sidebar เหลือที่ให้รายการตารางยาว ๆ */
+  const [connsOpen, setConnsOpen] = useState(() => localStorage.getItem(CONNS_OPEN_KEY) === "1");
   const [cell, setCell] = useState<{ col: string; v: unknown } | null>(null);
   // ประวัติคำสั่งที่เปลี่ยนข้อมูล — อยู่ในเครื่องนี้เท่านั้น ไม่ได้เขียนอะไรลง db
   const [log, setLog] = useState<hist.Entry[]>(hist.load);
@@ -2462,6 +2467,18 @@ export default function App() {
   const [aiBusy, setAiBusy] = useState(false);
   const [aiErr, setAiErr] = useState("");
   const [ai, setAi] = useState<AiPrefs>(loadAi);
+  /** โมเดล Codex ที่ codex CLI ในเครื่องรองรับ — ว่าง = ใช้รายชื่อที่ฝังไว้ */
+  const [codexModels, setCodexModels] = useState<{ cli: string; id: string; name: string }[]>([]);
+  useEffect(() => {
+    invoke<[string, string][]>("ai_models")
+      .then((ms) => setCodexModels(ms.map(([id, name]) => ({ cli: "Codex", id, name }))))
+      .catch(() => {});
+  }, []);
+  const aiModels = useMemo(() => {
+    const ms = AI_MODELS.filter((m) => m.cli !== "Codex" || !codexModels.length).concat(codexModels);
+    // รุ่นที่จำไว้แต่ไม่อยู่ในรายชื่อแล้ว ยังโชว์ไว้ ไม่ให้ select ว่าง
+    return ms.some((m) => m.id === ai.model) ? ms : [...ms, { cli: "Codex", id: ai.model, name: ai.model }];
+  }, [codexModels, ai.model]);
 
   const tab = tabs.find((t) => t.id === activeTab) ?? tabs[0];
   const tabConn = tab?.conn || activeConn;
@@ -2631,6 +2648,7 @@ export default function App() {
 
   useEffect(() => localStorage.setItem(FIND_KEY, findMode), [findMode]);
   useEffect(() => localStorage.setItem(VALUE_KEY, valOpen ? "1" : ""), [valOpen]);
+  useEffect(() => localStorage.setItem(CONNS_OPEN_KEY, connsOpen ? "1" : ""), [connsOpen]);
   // สลับแท็บแล้วช่อง Query โชว์ตัวกรองของแท็บนั้น
   useEffect(() => setQtext(tab?.qf?.expr ?? ""), [tab?.id]);
 
@@ -3776,7 +3794,15 @@ export default function App() {
 
         <div className="side-section">
           <div className="side-label">
-            <Plug size={13} weight="duotone" /> connections
+            <span
+              className="sidefold"
+              title={connsOpen ? "พับ — เหลือแค่ connection ที่ใช้อยู่" : "กางดู connection ทั้งหมด"}
+              onClick={() => setConnsOpen((o) => !o)}
+            >
+              <CaretRight size={10} weight="bold" className={connsOpen ? "caret open" : "caret"} />
+              <Plug size={13} weight="duotone" /> connections
+              {!connsOpen && <em>{conns.length}</em>}
+            </span>
             <button title="เพิ่ม connection" onClick={() => {
                 setTest(null);
                 setForm({ ...BLANK, id: uid() });
@@ -3785,6 +3811,9 @@ export default function App() {
             </button>
           </div>
           {grouped(conns).map((g) => {
+            // พับอยู่: โชว์แค่ connection ที่ใช้อยู่ (ยังไม่ได้เลือกอันไหน = โชว์ทั้งหมดให้เลือก)
+            const compact = !connsOpen && conns.some((c) => c.id === activeConn);
+            if (compact && !g.items.some((c) => c.id === activeConn)) return null;
             const saveName = () => {
               if (gRename && gRename.to.trim() !== g.name) {
                 setConns((cs) => renameGroup(cs, g.name, gRename.to));
@@ -3795,7 +3824,7 @@ export default function App() {
             };
             return (
               <div key={g.name} className="cgroup">
-                <div className="cghead">
+                {!compact && <div className="cghead">
                   {gRename?.from === g.name ? (
                     <input
                       autoFocus
@@ -3825,8 +3854,8 @@ export default function App() {
                       </button>
                     </>
                   )}
-                </div>
-                {!folded.includes(g.name) && g.items.map((c) => (
+                </div>}
+                {(compact || !folded.includes(g.name)) && g.items.filter((c) => !compact || c.id === activeConn).map((c) => (
                 <button
                   key={c.id}
                   className={"conn" + (activeConn === c.id ? " on" : "")}
@@ -4257,9 +4286,11 @@ export default function App() {
           </div>
           <div className="spacer" />
           {editable ? (
-            <span style={{ color: "var(--dim)", fontSize: 12 }}>
-              <PencilSimple size={12} style={{ verticalAlign: -1 }} /> คลิกเลือก cell · พิมพ์ได้เลย
-              หรือกด Enter/F2 · Enter บันทึกแล้วลงแถวถัดไป · Tab บันทึกแล้วไปขวา · Esc ยกเลิก
+            <span
+              style={{ color: "var(--dim)", fontSize: 12, whiteSpace: "nowrap" }}
+              title="คลิกเลือก cell แล้วพิมพ์ได้เลย หรือกด Enter/F2 · Enter บันทึกแล้วลงแถวถัดไป · Tab บันทึกแล้วไปขวา · Esc ยกเลิก"
+            >
+              <PencilSimple size={12} style={{ verticalAlign: -1 }} /> เลือก cell แล้วพิมพ์เพื่อแก้ · Esc ยกเลิก
             </span>
           ) : (
             editReason && <span style={{ color: "var(--dim)", fontSize: 12 }}>{editReason}</span>
@@ -4294,9 +4325,9 @@ export default function App() {
               onChange={(e) => setAi({ ...ai, model: e.target.value })}
               title="โมเดล"
             >
-              {[...new Set(AI_MODELS.map((m) => m.cli))].map((cli) => (
+              {[...new Set(aiModels.map((m) => m.cli))].map((cli) => (
                 <optgroup key={cli} label={cli}>
-                  {AI_MODELS.filter((m) => m.cli === cli).map((m) => (
+                  {aiModels.filter((m) => m.cli === cli).map((m) => (
                     <option key={m.id} value={m.id}>
                       {m.name}
                     </option>

@@ -3737,3 +3737,33 @@ div.syncrow .check {
 .tables .tblcols {
   margin-left: 50px;
 }
+
+/* หัวข้อ connections กดพับ/กางได้ */
+.sidefold {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.sidefold:hover {
+  color: var(--text);
+}
+
+.sidefold .caret {
+  transition: transform 0.15s;
+}
+
+.sidefold .caret.open {
+  transform: rotate(90deg);
+}
+
+.sidefold em {
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--panel-2);
+  font-style: normal;
+  font-size: 10px;
+  letter-spacing: 0;
+}
